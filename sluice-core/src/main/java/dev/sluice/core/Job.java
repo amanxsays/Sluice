@@ -11,5 +11,8 @@ public record Job(
         String claimedBy,
         Instant claimedAt,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        Instant leaseExpiresAt,
+        int attempts,
+        Instant availableAt
 ) {}

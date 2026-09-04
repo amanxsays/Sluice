@@ -1,11 +1,14 @@
 package dev.sluice.core;
 
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.sql.Connection;
 import java.sql.Statement;
+import java.time.Duration;
+import java.time.Instant;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -63,8 +66,8 @@ public class JobsRepositoryTest {
     void claimAssignsApendingJobToWorker() {
         Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", "key-123");
 
-        Optional<Job> claimedByA = repository.claim("worker-A");
-        Optional<Job> claimedByB = repository.claim("worker-B");
+        Optional<Job> claimedByA = repository.claim("worker-A",30);
+        Optional<Job> claimedByB = repository.claim("worker-B",30);
 
         assertTrue(claimedByA.isPresent());
         assertEquals(job.id(), claimedByA.get().id());
@@ -83,7 +86,7 @@ public class JobsRepositoryTest {
             String workerId="worker-"+i;
             tasks.add(() -> {
                 Optional<Job> claimed;
-                while ((claimed = repository.claim(workerId)).isPresent()) {
+                while ((claimed = repository.claim(workerId,30)).isPresent()) {
                     claimedIds.add(claimed.get().id());
                 }
                 return null;
@@ -96,4 +99,113 @@ public class JobsRepositoryTest {
         assertEquals(20, claimedIds.size());
         assertEquals(20, new HashSet<>(claimedIds).size());
     }
+
+    @Test
+    void claimSetsLeaseExpiryApproximatelyLeaseSecondsFromNow(){
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+    
+        Instant before = Instant.now();
+        Job claimed = repository.claim("worker-A", 30).orElseThrow();
+        Instant expectedExpiry = before.plusSeconds(30);
+
+        long diffSeconds =Math.abs(
+            Duration.between(expectedExpiry, claimed.leaseExpiresAt()).getSeconds()
+        );
+
+        assertTrue(diffSeconds<2);
+    }
+
+    @Test
+    void heartbeatSucceedsForRightfulOwner(){
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+
+        Job claimed = repository.claim("worker-A", 30).orElseThrow();
+
+        boolean alive = repository.heartbeat(claimed.id(), "worker-A", 40);
+
+        assertTrue(alive);
+    }
+
+    @Test
+    void heartbeatFailsForAJobThatNotClaimed(){
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+
+        boolean alive = repository.heartbeat(job.id(), "worker-A", 40);
+
+        assertFalse(alive);
+    }
+
+    @Test
+    void reclaimExpiredLeasesMakeDeadTasksReclaimable(){
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        Job claimed = repository.claim("worker-A", -5).orElseThrow();
+
+        int count = repository.reclaimExpiredLeases(5);
+
+        assertEquals(1, count);
+
+        Job reclaimed = repository.findById(claimed.id()).orElseThrow();
+        assertEquals("pending", reclaimed.status());
+        assertNull(reclaimed.claimedBy());
+    }
+
+    @Test
+    void markFailedIncrementsAttemptsAndSetsAvailableAt(){
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        Job claimed = repository.claim("worker-A", 30).orElseThrow();
+
+        Instant before = Instant.now();
+        boolean markedFailed = repository.markFailed(claimed.id(), "worker-A", 10,5);
+        Instant backOffTime = before.plusSeconds(10);
+
+        assertTrue(markedFailed);
+
+        Job job = repository.findById(claimed.id()).orElseThrow();
+
+        assertEquals("pending", job.status());
+        assertEquals(1, job.attempts());
+        long diffSeconds = Math.abs(Duration.between(backOffTime, job.availableAt()).getSeconds());
+        assertTrue(diffSeconds < 2);
+    }
+
+    @Test
+    void markFailedFailsWhenWorkerDoesNotOwnJob(){
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        Job claimed = repository.claim("worker-A", 30).orElseThrow();
+
+        boolean markedFailed = repository.markFailed(claimed.id(), "worker-B", 13,5);
+
+        assertFalse(markedFailed);
+    }
+
+    @Test
+    void markFailedDeadLettersJobAfterMaxAttempts(){
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        int maxAttempts=3;
+        for(int i=0;i<maxAttempts;i++){
+            Job claimed = repository.claim("worker-A", 30).orElseThrow();
+            boolean markedFailed = repository.markFailed(claimed.id(), "worker-A", 0, maxAttempts);
+            assertTrue(markedFailed);
+        }
+
+        Job foundJob = repository.findById(job.id()).orElseThrow();
+        assertEquals("dead_letter", foundJob.status());
+        assertEquals(maxAttempts, foundJob.attempts());
+    }
+
+    @Test
+    void reclaimExpiredLeasesDeadLettersJobAfterMaxAttempts(){
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        int maxAttempts=3;
+        for(int i=0;i<maxAttempts;i++){
+            Job claimed = repository.claim("worker-A", -5).orElseThrow();
+            int count = repository.reclaimExpiredLeases(maxAttempts);
+            assertEquals(1,count);
+        }
+
+        Job foundJob = repository.findById(job.id()).orElseThrow();
+        assertEquals("dead_letter", foundJob.status());
+        assertEquals(maxAttempts, foundJob.attempts());
+    }
+
 }

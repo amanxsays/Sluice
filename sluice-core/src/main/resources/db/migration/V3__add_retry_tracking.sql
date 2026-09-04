@@ -1,0 +1,3 @@
+ALTER TABLE jobs
+    ADD COLUMN attempts INT NOT NULL DEFAULT 0,
+    ADD COLUMN available_at TIMESTAMPTZ;
