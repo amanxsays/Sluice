@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="dev.sluice.core.BackoffCalculatorTest" time="0.114" tests="2" errors="0" skipped="0" failures="0" flakes="0">
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="dev.sluice.core.JobSchedulesRepositoryTest" time="10.649" tests="1" errors="0" skipped="0" failures="0" flakes="0">
   <properties>
     <property name="java.specification.version" value="21"/>
     <property name="sun.cpu.isalist" value="amd64"/>
@@ -9,6 +9,7 @@
     <property name="sun.arch.data.model" value="64"/>
     <property name="user.variant" value=""/>
     <property name="java.vendor.url" value="https://java.oracle.com/"/>
+    <property name="user.timezone" value="Asia/Calcutta"/>
     <property name="os.name" value="Windows 11"/>
     <property name="java.vm.specification.version" value="21"/>
     <property name="sun.java.launcher" value="SUN_STANDARD"/>
@@ -31,6 +32,7 @@
     <property name="java.specification.name" value="Java Platform API Specification"/>
     <property name="surefire.real.class.path" value="C:\Users\amanj\AppData\Local\Temp\surefire477722372764426334\surefirebooter-20260906011355972_3.jar"/>
     <property name="user.script" value=""/>
+    <property name="polyglot.engine.WarnInterpreterOnly" value="false"/>
     <property name="sun.management.compiler" value="HotSpot 64-Bit Tiered Compilers"/>
     <property name="java.runtime.version" value="21.0.1+12-LTS-29"/>
     <property name="user.name" value="amanj"/>
@@ -57,6 +59,42 @@
     <property name="sun.io.unicode.encoding" value="UnicodeLittle"/>
     <property name="java.class.version" value="65.0"/>
   </properties>
-  <testcase name="nextDelaySecondsNeverExceedsMaxDelay" classname="dev.sluice.core.BackoffCalculatorTest" time="0.059"/>
-  <testcase name="nextDelaySecondsIsReproducibleWithSeededRandom" classname="dev.sluice.core.BackoffCalculatorTest" time="0.011"/>
+  <testcase name="fireScheduleSpawnsJobAndAdvancesNextRunAt" classname="dev.sluice.core.JobSchedulesRepositoryTest" time="1.312">
+    <system-err><![CDATA[[main] INFO org.testcontainers.images.PullPolicy - Image pull policy will be performed by: DefaultPullPolicy()
+[main] INFO org.testcontainers.utility.ImageNameSubstitutor - Image name substitution will be performed by: DefaultImageNameSubstitutor (composite of 'ConfigurationFileImageNameSubstitutor' and 'PrefixingImageNameSubstitutor')
+[main] INFO org.testcontainers.DockerClientFactory - Testcontainers version: 1.21.4
+[main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy - Loaded org.testcontainers.dockerclient.NpipeSocketClientProviderStrategy from ~/.testcontainers.properties, will try it first
+[main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy - Found Docker environment with local Npipe socket (npipe:////./pipe/docker_engine)
+[main] INFO org.testcontainers.DockerClientFactory - Docker host IP address is localhost
+[main] INFO org.testcontainers.DockerClientFactory - Connected to docker: 
+  Server Version: 29.7.2
+  API Version: 1.55
+  Operating System: Docker Desktop
+  Total Memory: 7598 MB
+  Labels: 
+    com.docker.desktop.address=npipe://\\.\pipe\docker_cli
+[main] INFO tc.testcontainers/ryuk:0.12.0 - Creating container for image: testcontainers/ryuk:0.12.0
+[main] INFO tc.testcontainers/ryuk:0.12.0 - Container testcontainers/ryuk:0.12.0 is starting: ca007d2cf8c659db6042e5005bf833fcc012e8fc51894bed5f90ed83c70cfbd7
+[main] INFO tc.testcontainers/ryuk:0.12.0 - Container testcontainers/ryuk:0.12.0 started in PT0.8214841S
+[main] INFO org.testcontainers.utility.RyukResourceReaper - Ryuk started - will monitor and terminate Testcontainers containers on JVM exit
+[main] INFO org.testcontainers.DockerClientFactory - Checking the system...
+[main] INFO org.testcontainers.DockerClientFactory - ✔︎ Docker server version should be at least 1.6.0
+[main] INFO tc.postgres:16-alpine - Creating container for image: postgres:16-alpine
+[main] INFO tc.postgres:16-alpine - Container postgres:16-alpine is starting: f52f0e700b1a86cff3d4696f6928cb7df7b180938775229c085b480243140e6c
+[main] INFO tc.postgres:16-alpine - Container postgres:16-alpine started in PT2.3432234S
+[main] INFO tc.postgres:16-alpine - Container is started (JDBC URL: jdbc:postgresql://localhost:61936/test?loggerLevel=OFF)
+[main] INFO org.flywaydb.core.FlywayExecutor - Database: jdbc:postgresql://localhost:61936/test?adaptiveFetch=false&adaptiveFetchMaximum=-1&adaptiveFetchMinimum=0&allowEncodingChanges=false&ApplicationName=PostgreSQL+JDBC+Driver&autosave=never&binaryTransfer=true&binaryTransferDisable=&binaryTransferEnable=&cancelSignalTimeout=10&channelBinding=prefer&classLoaderStrategy=driver-first&cleanupSavepoints=false&connectTimeout=10&convertBooleanToNumeric=false&databaseMetadataCacheFields=65536&databaseMetadataCacheFieldsMiB=5&defaultRowFetchSize=0&disableColumnSanitiser=false&escapeSyntaxCallMode=select&flushCacheOnDdl=true&groupStartupParameters=false&gssEncMode=allow&gsslib=auto&gssResponseTimeout=5000&gssUseDefaultCreds=false&hideUnprivilegedObjects=false&hostRecheckSeconds=10&jaasApplicationName=pgjdbc&jaasLogin=true&loadBalanceHosts=false&loggerLevel=OFF&loginTimeout=0&logServerErrorDetail=true&logUnclosedConnections=false&maxSendBufferSize=8192&pemKeyAlgorithm=RSA&preferQueryMode=extended&preparedStatementCacheQueries=256&preparedStatementCacheSizeMiB=5&prepareThreshold=5&protocolVersion=3&queryTimeout=0&quoteReturningIdentifiers=true&readOnly=false&readOnlyMode=transaction&receiveBufferSize=-1&reWriteBatchedInserts=false&reWriteBatchedInsertsSize=0&scramMaxIterations=100000&sendBufferSize=-1&socketTimeout=0&sslfactory=org.postgresql.ssl.LibPQFactory&sslNegotiation=postgres&sslResponseTimeout=5000&sspiServiceClass=POSTGRES&targetServerType=any&tcpKeepAlive=false&tcpNoDelay=true&unknownLength=2147483647&useSpnego=false&xmlFactoryFactory= (PostgreSQL 16.15)
+[main] INFO org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory - Schema history table "public"."flyway_schema_history" does not exist yet
+[main] INFO org.flywaydb.core.internal.command.DbValidate - Successfully validated 6 migrations (execution time 00:00.035s)
+[main] INFO org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory - Creating Schema History table "public"."flyway_schema_history" ...
+[main] INFO org.flywaydb.core.internal.command.DbMigrate - Current version of schema "public": << Empty Schema >>
+[main] INFO org.flywaydb.core.internal.command.DbMigrate - Migrating schema "public" to version "1 - create jobs table"
+[main] INFO org.flywaydb.core.internal.command.DbMigrate - Migrating schema "public" to version "2 - add lease expires at"
+[main] INFO org.flywaydb.core.internal.command.DbMigrate - Migrating schema "public" to version "3 - add retry tracking"
+[main] INFO org.flywaydb.core.internal.command.DbMigrate - Migrating schema "public" to version "4 - add dead letter status"
+[main] INFO org.flywaydb.core.internal.command.DbMigrate - Migrating schema "public" to version "5 - add priority"
+[main] INFO org.flywaydb.core.internal.command.DbMigrate - Migrating schema "public" to version "6 - create job schedules table"
+[main] INFO org.flywaydb.core.internal.command.DbMigrate - Successfully applied 6 migrations to schema "public", now at version v6 (execution time 00:00.086s)
+]]></system-err>
+  </testcase>
 </testsuite>
