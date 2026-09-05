@@ -14,5 +14,6 @@ public record Job(
         Instant updatedAt,
         Instant leaseExpiresAt,
         int attempts,
-        Instant availableAt
+        Instant availableAt,
+        int priority
 ) {}

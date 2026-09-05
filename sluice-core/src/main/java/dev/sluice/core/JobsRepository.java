@@ -17,15 +17,18 @@ public class JobsRepository {
         this.dataSource=dataSource;
     }
 
-    public Job enqueue(String jobType,String payloadJson,String idempotencyKey){
-        String sqlCommand="INSERT INTO jobs (job_type, payload, idempotency_key) VALUES (?, ?::jsonb, ?) RETURNING *";
+    public Job enqueue(String jobType,String payloadJson,String idempotencyKey,int priority){
+        String sqlCommand="INSERT INTO jobs (job_type, payload, idempotency_key, priority) VALUES (?, ?::jsonb, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING RETURNING *";
         try (Connection conn = dataSource.getConnection();
             PreparedStatement ps = conn.prepareStatement(sqlCommand)){
                 ps.setString(1, jobType);
                 ps.setString(2, payloadJson);
                 ps.setString(3, idempotencyKey);
+                ps.setInt(4, priority);
             try (ResultSet rs=ps.executeQuery()){
-                rs.next();
+                if(!rs.next()){
+                    return findByIdempotencyKey(idempotencyKey).orElseThrow();
+                }
                 return mapRow(rs);
             }
         }
@@ -46,8 +49,9 @@ public class JobsRepository {
         Instant leaseExpiresAt=toInstant(rs.getTimestamp("lease_expires_at"));
         int attempts=rs.getInt("attempts");
         Instant availableAt=toInstant(rs.getTimestamp("available_at"));
+        int priority=rs.getInt("priority");
 
-        return new Job(id,jobType,payLoad,idempotencyKey,status,claimedBy,claimedAt,createdAt,updatedAt,leaseExpiresAt,attempts,availableAt);
+        return new Job(id,jobType,payLoad,idempotencyKey,status,claimedBy,claimedAt,createdAt,updatedAt,leaseExpiresAt,attempts,availableAt,priority);
     }
     private Instant toInstant(Timestamp ts){
         if(ts==null) return null;
@@ -59,7 +63,7 @@ public class JobsRepository {
             WITH next_job AS (
                 SELECT id FROM jobs
                 WHERE status = 'pending' AND (available_at IS NULL OR available_at <= now())
-                ORDER BY created_at
+                ORDER BY priority DESC, created_at
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -166,6 +170,25 @@ public class JobsRepository {
             return ps.executeUpdate() > 0;
         } catch ( SQLException e){
             throw new JobPersistenceException("Unable to make Job attempt as failed with jobId "+jobId, e);
+        }
+    }
+    
+    public Optional<Job> findByIdempotencyKey(String idempotencyKey){
+        String sqlCommand = "SELECT * FROM jobs WHERE idempotency_key = ?";
+
+        try (Connection conn = dataSource.getConnection();
+            PreparedStatement ps = conn.prepareStatement(sqlCommand)){
+            
+                ps.setString(1, idempotencyKey);
+
+                try (ResultSet rs = ps.executeQuery()){
+                    if (!rs.next()){
+                        return Optional.empty();
+                    }
+                    return Optional.of(mapRow(rs));
+                }
+        } catch (SQLException e){
+            throw new JobPersistenceException("Failed to find job with idempotency_key " + idempotencyKey, e);
         }
     }
 

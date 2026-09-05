@@ -2,6 +2,8 @@ package dev.sluice.core;
 
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -19,6 +21,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import org.checkerframework.checker.units.qual.t;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,7 +57,7 @@ public class JobsRepositoryTest {
 
     @Test
     void enqueueInsertsAPendingJob() {
-        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", "key-123");
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", "key-123",0);
 
         assertTrue(job.id() > 0);
         assertEquals("send-email", job.jobType());
@@ -64,7 +67,7 @@ public class JobsRepositoryTest {
 
     @Test
     void claimAssignsApendingJobToWorker() {
-        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", "key-123");
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", "key-123",0);
 
         Optional<Job> claimedByA = repository.claim("worker-A",30);
         Optional<Job> claimedByB = repository.claim("worker-B",30);
@@ -76,7 +79,7 @@ public class JobsRepositoryTest {
 
     @Test
     void claimNeverAssignsSameJobToWorker() throws InterruptedException {
-        for(int i=1;i<=20;i++) repository.enqueue("send-email-"+i, "{\"to\":\"a@b.com\"}", null);
+        for(int i=1;i<=20;i++) repository.enqueue("send-email-"+i, "{\"to\":\"a@b.com\"}", null,0);
 
         ExecutorService executor = Executors.newFixedThreadPool(4);
         List<Long> claimedIds = new CopyOnWriteArrayList<>();
@@ -102,7 +105,7 @@ public class JobsRepositoryTest {
 
     @Test
     void claimSetsLeaseExpiryApproximatelyLeaseSecondsFromNow(){
-        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
     
         Instant before = Instant.now();
         Job claimed = repository.claim("worker-A", 30).orElseThrow();
@@ -117,7 +120,7 @@ public class JobsRepositoryTest {
 
     @Test
     void heartbeatSucceedsForRightfulOwner(){
-        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
 
         Job claimed = repository.claim("worker-A", 30).orElseThrow();
 
@@ -128,7 +131,7 @@ public class JobsRepositoryTest {
 
     @Test
     void heartbeatFailsForAJobThatNotClaimed(){
-        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
 
         boolean alive = repository.heartbeat(job.id(), "worker-A", 40);
 
@@ -137,7 +140,7 @@ public class JobsRepositoryTest {
 
     @Test
     void reclaimExpiredLeasesMakeDeadTasksReclaimable(){
-        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
         Job claimed = repository.claim("worker-A", -5).orElseThrow();
 
         int count = repository.reclaimExpiredLeases(5);
@@ -151,7 +154,7 @@ public class JobsRepositoryTest {
 
     @Test
     void markFailedIncrementsAttemptsAndSetsAvailableAt(){
-        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
         Job claimed = repository.claim("worker-A", 30).orElseThrow();
 
         Instant before = Instant.now();
@@ -170,7 +173,7 @@ public class JobsRepositoryTest {
 
     @Test
     void markFailedFailsWhenWorkerDoesNotOwnJob(){
-        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
         Job claimed = repository.claim("worker-A", 30).orElseThrow();
 
         boolean markedFailed = repository.markFailed(claimed.id(), "worker-B", 13,5);
@@ -180,7 +183,7 @@ public class JobsRepositoryTest {
 
     @Test
     void markFailedDeadLettersJobAfterMaxAttempts(){
-        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
         int maxAttempts=3;
         for(int i=0;i<maxAttempts;i++){
             Job claimed = repository.claim("worker-A", 30).orElseThrow();
@@ -195,7 +198,7 @@ public class JobsRepositoryTest {
 
     @Test
     void reclaimExpiredLeasesDeadLettersJobAfterMaxAttempts(){
-        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null);
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
         int maxAttempts=3;
         for(int i=0;i<maxAttempts;i++){
             Job claimed = repository.claim("worker-A", -5).orElseThrow();
@@ -206,6 +209,29 @@ public class JobsRepositoryTest {
         Job foundJob = repository.findById(job.id()).orElseThrow();
         assertEquals("dead_letter", foundJob.status());
         assertEquals(maxAttempts, foundJob.attempts());
+    }
+
+    @Test 
+    void enqueueWithSameIdempotencyKeyReturnsSameJob(){
+        Job jobA = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", "key-abc",0);
+        Job jobB = repository.enqueue("send-email", "{\"to\":\"m@n.com\"}", "key-abc",0);
+        assertEquals(jobA.id(), jobB.id());
+        assertEquals(jobA.payload(), jobB.payload());
+    }
+
+    @Test 
+    void enqueueWithNullIdempotencyKeyAllowsMultipleJobs(){
+        Job jobA = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
+        Job jobB = repository.enqueue("send-email", "{\"to\":\"m@n.com\"}", null,0);
+        assertNotEquals(jobA.id(), jobB.id());
+    }
+
+    @Test 
+    void claimPicksHigherPriorityJobFirst(){
+        Job normalJob = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
+        Job urgentJob = repository.enqueue("send-email", "{\"to\":\"m@n.com\"}", null,5);
+        Job claimed = repository.claim("worker-A", 30).orElseThrow();
+        assertEquals(urgentJob.id(), claimed.id());
     }
 
 }
