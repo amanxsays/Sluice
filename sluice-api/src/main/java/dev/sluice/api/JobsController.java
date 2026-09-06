@@ -18,6 +18,6 @@ public class JobsController {
 
     @PostMapping("/jobs")
     public Job enqueue(@RequestBody EnqueueRequest request){
-        return jobsRepository.enqueue(request.jobType(), request.payload(), request.idempotencyKey());
+        return jobsRepository.enqueue(request.jobType(), request.payload(), request.idempotencyKey(),0);
     }
 }

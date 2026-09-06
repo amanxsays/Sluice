@@ -1,4 +1,4 @@
 package dev.sluice.api;
 
-public record EnqueueRequest(String jobType, String payload, String idempotencyKey) {
+public record EnqueueRequest(String jobType, String payload, String idempotencyKey, int priority) {
 }

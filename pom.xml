@@ -19,6 +19,7 @@
     <modules>
         <module>sluice-core</module>
         <module>sluice-api</module>
+        <module>mock-upstream</module>
     </modules>
 
     <properties>

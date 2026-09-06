@@ -231,4 +231,24 @@ public class JobsRepositoryTest {
         assertEquals(urgentJob.id(), claimed.id());
     }
 
+    @Test
+    void markCompletedSucceedsForRightfulOwner(){
+        repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
+
+        Job claimed = repository.claim("worker-A", 30).orElseThrow();
+
+        boolean alive = repository.markCompleted(claimed.id(), "worker-A");
+
+        assertTrue(alive);
+    }
+
+    @Test
+    void markCompletedFailsForAJobThatNotClaimed(){
+        Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null,0);
+
+        boolean alive = repository.markCompleted(job.id(), "worker-A");
+
+        assertFalse(alive);
+    }
+
 }

@@ -192,4 +192,25 @@ public class JobsRepository {
         }
     }
 
+    public boolean markCompleted(long jobId, String workerId){
+        String sqlCommand = """
+                UPDATE jobs
+                SET status = 'completed',
+                    updated_at = now()
+                WHERE id = ? AND claimed_by = ? AND status = 'claimed'
+                """;
+
+        try (Connection conn = dataSource.getConnection();
+            PreparedStatement ps=conn.prepareStatement(sqlCommand);){
+            
+            ps.setLong(1, jobId);
+            ps.setString(2, workerId);
+
+            int rowsUpdated = ps.executeUpdate();
+            return rowsUpdated>0;
+        } catch (SQLException e){
+            throw new JobPersistenceException("Failed to mark job completed with job " + jobId, e);
+        }
+    }
+
 }
