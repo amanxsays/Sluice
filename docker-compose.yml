@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mock-upstream:
+    build:
+      context: .
+      dockerfile: mock-upstream/Dockerfile
+    ports:
+      - "8081:8081"
+
+  sluice-api:
+    build:
+      context: .
+      dockerfile: sluice-api/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/postgres
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      SLUICE_MOCK_UPSTREAM_URL: http://mock-upstream:8081/simulate
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-upstream:
+        condition: service_started
+
+volumes:
+  postgres-data:

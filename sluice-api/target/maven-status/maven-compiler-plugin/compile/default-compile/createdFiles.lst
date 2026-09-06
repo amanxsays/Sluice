@@ -1,0 +1,5 @@
+dev\sluice\api\SluiceApiApplication.class
+dev\sluice\api\JobsController.class
+dev\sluice\api\EnqueueRequest.class
+dev\sluice\api\AppConfig.class
+dev\sluice\api\WorkerStartup.class

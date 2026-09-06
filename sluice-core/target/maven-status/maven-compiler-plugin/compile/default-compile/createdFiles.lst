@@ -1,0 +1,13 @@
+dev\sluice\core\BackoffCalculator.class
+dev\sluice\core\Job.class
+dev\sluice\core\JobsRepository.class
+dev\sluice\core\RateLimitedException.class
+dev\sluice\core\JobPersistenceException.class
+dev\sluice\core\Worker.class
+dev\sluice\core\ConsoleLoggingHandler.class
+dev\sluice\core\JobSchedule.class
+dev\sluice\core\SimulatedApiCallHandler$SimulationConfig.class
+dev\sluice\core\SimulatedApiCallHandler.class
+dev\sluice\core\JobSchedulesRepository.class
+dev\sluice\core\CronScheduleCalculator.class
+dev\sluice\core\JobHandler.class

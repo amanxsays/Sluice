@@ -1,0 +1,5 @@
+dev\sluice\core\BackoffCalculatorTest.class
+dev\sluice\core\CronScheduleCalculatorTest.class
+dev\sluice\core\JobSchedulesRepositoryTest.class
+dev\sluice\core\WorkerTest.class
+dev\sluice\core\JobsRepositoryTest.class
