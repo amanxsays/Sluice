@@ -349,7 +349,7 @@ Requires a running Docker daemon — most tests spin up a disposable Postgres co
 | 4 | 32.49 | 2,610 |
 | 8 | 44.84 | 1,915 |
 
-![Benchmark results: throughput increasing and p95 latency decreasing as worker count scales from 1 to 8](benchmark-results.png)
+![Benchmark results: throughput increasing and p95 latency decreasing as worker count scales from 1 to 8](sluice-benchmark-results.png)
 
 Throughput scales substantially with worker count — roughly **4.9×** going from 1 to 8 workers — and p95 latency drops correspondingly, from over 10 seconds down to under 2. Scaling isn't perfectly linear past 4 workers, which is expected and worth stating plainly rather than hiding: every worker still contends for the same single Postgres instance and the same single `mock-upstream` instance, and the benchmark harness itself opens an unpooled JDBC connection per call rather than using a connection pool — both are real, identifiable ceilings on how far throughput can climb before something else becomes the bottleneck.
 
