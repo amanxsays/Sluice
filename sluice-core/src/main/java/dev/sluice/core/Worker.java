@@ -10,6 +10,7 @@ public class Worker {
     private final int leaseSeconds;
     private final BackoffCalculator backoffCalculator;
     private final int maxAttempts;
+    private volatile boolean running = true;
 
     public Worker(JobsRepository jobsRepository, Map<String, JobHandler> handlers, String workerId, int leaseSeconds, BackoffCalculator backoffCalculator, int maxAttempts) {
         this.jobsRepository = jobsRepository;
@@ -43,7 +44,7 @@ public class Worker {
     }
 
     public void run(){
-        while (true) {
+        while (running) {
             boolean result = processOnce();
             if(!result){
                 try {
@@ -55,5 +56,7 @@ public class Worker {
             }
         }
     } 
+
+    public void stop() { running = false; }
 
 }
