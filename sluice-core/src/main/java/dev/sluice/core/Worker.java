@@ -3,6 +3,8 @@ package dev.sluice.core;
 import java.util.Map;
 import java.util.Optional;
 
+import io.micrometer.core.instrument.MeterRegistry;
+
 public class Worker {
     private final JobsRepository jobsRepository;
     private final Map<String, JobHandler> handlers;
@@ -11,14 +13,16 @@ public class Worker {
     private final BackoffCalculator backoffCalculator;
     private final int maxAttempts;
     private volatile boolean running = true;
+    private final MeterRegistry meterRegistry;
 
-    public Worker(JobsRepository jobsRepository, Map<String, JobHandler> handlers, String workerId, int leaseSeconds, BackoffCalculator backoffCalculator, int maxAttempts) {
+    public Worker(JobsRepository jobsRepository, Map<String, JobHandler> handlers, String workerId, int leaseSeconds, BackoffCalculator backoffCalculator, int maxAttempts,MeterRegistry meterRegistry) {
         this.jobsRepository = jobsRepository;
         this.handlers = handlers;
         this.workerId = workerId;
         this.leaseSeconds = leaseSeconds;
         this.backoffCalculator = backoffCalculator;
         this.maxAttempts = maxAttempts;
+        this.meterRegistry = meterRegistry;
     }
 
     public boolean processOnce() {
@@ -34,12 +38,16 @@ public class Worker {
             }
             handler.handle(job);
             jobsRepository.markCompleted(job.id(), workerId);
+            meterRegistry.counter("sluice.worker.jobs", "outcome", "completed").increment();
         } catch (RateLimitedException e) {
             jobsRepository.markFailed(job.id(), workerId, e.retryAfterSeconds(), maxAttempts);
+            meterRegistry.counter("sluice.worker.jobs", "outcome", "failed").increment();
         } catch (Exception e) {
             int backoffSeconds = backoffCalculator.nextDelaySeconds(job.attempts());
             jobsRepository.markFailed(job.id(), workerId, backoffSeconds, maxAttempts);
+            meterRegistry.counter("sluice.worker.jobs", "outcome", "failed").increment();
         }
+        meterRegistry.counter("sluice.worker.jobs", "outcome", "no_handler").increment();
         return true;
     }
 
