@@ -7,6 +7,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import org.postgresql.ds.PGSimpleDataSource;
+
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.Statement;
@@ -36,7 +39,7 @@ public class BenchmarkRunner {
         List<Worker> workers = new ArrayList<>();
 
         for (int i = 0; i < workerCount; i++) {
-            Worker worker = new Worker(repository, handlers, "bench-worker-" + i, 30, new BackoffCalculator(1, 60), 5);
+            Worker worker = new Worker(repository, handlers, "bench-worker-" + i, 30, new BackoffCalculator(1, 60), 5,new SimpleMeterRegistry());
             workers.add(worker);
             Thread thread = new Thread(worker::run);
             thread.setDaemon(true);

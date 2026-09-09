@@ -4,6 +4,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 
 public class Worker {
     private final JobsRepository jobsRepository;
@@ -33,12 +34,18 @@ public class Worker {
         Job job = claimed.get();
         JobHandler handler = handlers.get(job.jobType());
         try {
-            if (handler == null) {
-                throw new IllegalStateException("No handler registered for job type: " + job.jobType());
+            Timer.Sample sample = Timer.start(meterRegistry);
+            try {
+                if (handler == null) {
+                    meterRegistry.counter("sluice.worker.jobs", "outcome", "no_handler").increment();
+                    throw new IllegalStateException("No handler registered for job type: " + job.jobType());
+                }
+                handler.handle(job);
+                jobsRepository.markCompleted(job.id(), workerId);
+                meterRegistry.counter("sluice.worker.jobs", "outcome", "completed").increment();
+            } finally {
+                sample.stop(meterRegistry.timer("sluice.worker.job.duration"));
             }
-            handler.handle(job);
-            jobsRepository.markCompleted(job.id(), workerId);
-            meterRegistry.counter("sluice.worker.jobs", "outcome", "completed").increment();
         } catch (RateLimitedException e) {
             jobsRepository.markFailed(job.id(), workerId, e.retryAfterSeconds(), maxAttempts);
             meterRegistry.counter("sluice.worker.jobs", "outcome", "failed").increment();
@@ -47,7 +54,6 @@ public class Worker {
             jobsRepository.markFailed(job.id(), workerId, backoffSeconds, maxAttempts);
             meterRegistry.counter("sluice.worker.jobs", "outcome", "failed").increment();
         }
-        meterRegistry.counter("sluice.worker.jobs", "outcome", "no_handler").increment();
         return true;
     }
 

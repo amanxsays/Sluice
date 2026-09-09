@@ -11,6 +11,7 @@ import dev.sluice.core.JobHandler;
 import dev.sluice.core.JobsRepository;
 import dev.sluice.core.SimulatedApiCallHandler;
 import dev.sluice.core.Worker;
+import io.micrometer.core.instrument.MeterRegistry;
 
 @Component 
 public class WorkerStartup implements CommandLineRunner{
@@ -27,9 +28,11 @@ public class WorkerStartup implements CommandLineRunner{
     private String mockUpstreamUrl;
 
     final JobsRepository repository;
+    final MeterRegistry meterRegistry;
 
-    public WorkerStartup(JobsRepository repository){
-        this.repository=repository;
+    public WorkerStartup(JobsRepository repository, MeterRegistry meterRegistry){
+        this.repository = repository;
+        this.meterRegistry = meterRegistry;
     }
 
     @Override
@@ -37,7 +40,7 @@ public class WorkerStartup implements CommandLineRunner{
         Map<String, JobHandler> handlers = Map.of("call-api", new SimulatedApiCallHandler(mockUpstreamUrl));
         for (int i = 0; i < workerCount; i++) {
             String workerId = "worker-" + i;
-            Worker worker = new Worker(repository, handlers, workerId, leaseSeconds, new BackoffCalculator(1, 60), maxAttempts);
+            Worker worker = new Worker(repository, handlers, workerId, leaseSeconds, new BackoffCalculator(1, 60), maxAttempts, meterRegistry);
             Thread thread = new Thread(worker::run);
             thread.setDaemon(true);
             thread.start();

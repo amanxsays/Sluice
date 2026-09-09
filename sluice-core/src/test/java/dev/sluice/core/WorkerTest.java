@@ -20,6 +20,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+
 @Testcontainers 
 public class WorkerTest {
     @Container
@@ -48,7 +50,7 @@ public class WorkerTest {
 
     @Test
     void processOnceReturnsFalseOnEmptyQueue(){
-        Worker worker = new Worker(repository, Map.of(), "worker-A", 30, new BackoffCalculator(1, 60), 5);
+        Worker worker = new Worker(repository, Map.of(), "worker-A", 30, new BackoffCalculator(1, 60), 5,new SimpleMeterRegistry());
 
         boolean result = worker.processOnce();
 
@@ -59,7 +61,7 @@ public class WorkerTest {
     void processOnceReturnsTrueOnFullChainWorked(){
         Job job = repository.enqueue("send-email", "{\"to\":\"a@b.com\"}", null, 0);
         Map<String, JobHandler> handlers = Map.of("send-email", new ConsoleLoggingHandler());
-        Worker worker = new Worker(repository, handlers, "worker-A", 30, new BackoffCalculator(1, 60), 5);
+        Worker worker = new Worker(repository, handlers, "worker-A", 30, new BackoffCalculator(1, 60), 5,new SimpleMeterRegistry());
         boolean result = worker.processOnce();
         assertTrue(result);
 
@@ -70,7 +72,7 @@ public class WorkerTest {
     @Test 
     void processOnceStillReturnsTrueButFailsJobOnMissingHandler(){
         Job job = repository.enqueue("set-reminder", "{\"to\":\"a@b.com\"}", null, 0);
-        Worker worker = new Worker(repository, Map.of(), "worker-A", 30, new BackoffCalculator(1, 60), 5);
+        Worker worker = new Worker(repository, Map.of(), "worker-A", 30, new BackoffCalculator(1, 60), 5,new SimpleMeterRegistry());
         boolean result = worker.processOnce();
         assertTrue(result);
 
@@ -84,7 +86,7 @@ public class WorkerTest {
         Job job = repository.enqueue("call-api", "{\"latencyMs\":0,\"shouldFail\":true,\"retryAfterSeconds\":7}", null, 0);
         Map<String,JobHandler> handlers = Map.of("call-api", new SimulatedApiCallHandler("http://localhost:8081/simulate"));
 
-        Worker worker = new Worker(repository, handlers, "worker-A", 30, new BackoffCalculator(1, 60), 5);
+        Worker worker = new Worker(repository, handlers, "worker-A", 30, new BackoffCalculator(1, 60), 5,new SimpleMeterRegistry());
         
         Instant before = Instant.now();
         boolean result = worker.processOnce();

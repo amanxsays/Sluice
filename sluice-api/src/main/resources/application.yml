@@ -3,6 +3,7 @@ spring:
     url: jdbc:postgresql://localhost:5432/postgres
     username: postgres
     password: postgres
+
 sluice:
   worker:
     count: 2
@@ -10,3 +11,9 @@ sluice:
     max-attempts: 5
   mock-upstream:
     url: http://localhost:8081/simulate
+    
+management:
+  endpoints:
+    web:
+      exposure:
+        include: prometheus
