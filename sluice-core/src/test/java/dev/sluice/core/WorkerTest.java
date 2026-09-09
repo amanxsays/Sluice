@@ -3,14 +3,18 @@ package dev.sluice.core;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import org.junit.jupiter.api.Assumptions;
 
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.URI;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
-import java.util.logging.Handler;
 
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
@@ -82,7 +86,9 @@ public class WorkerTest {
     }
 
     @Test
-    void processOnceUsesRetryAfterOnRateLimit(){
+    void processOnceUsesRetryAfterOnRateLimit() throws Exception{
+        Assumptions.assumeTrue(isMockUpstreamReachable(), "mock-upstream not reachable, skipping");
+
         Job job = repository.enqueue("call-api", "{\"latencyMs\":0,\"shouldFail\":true,\"retryAfterSeconds\":7}", null, 0);
         Map<String,JobHandler> handlers = Map.of("call-api", new SimulatedApiCallHandler("http://localhost:8081/simulate"));
 
@@ -98,5 +104,19 @@ public class WorkerTest {
         long diffSeconds = Math.abs(Duration.between(expectedAvailableAt, jobFound.availableAt()).getSeconds());
         assertTrue(diffSeconds < 2);
         
+    }
+
+    private boolean isMockUpstreamReachable() {
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("http://localhost:8081/simulate?latencyMs=0&shouldFail=false&retryAfterSeconds=0"))
+                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .build();
+            HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
+            return response.statusCode() == 200;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }
