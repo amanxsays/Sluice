@@ -1,10 +1,12 @@
 # Sluice
 
+[![CI](https://github.com/amanxsays/Sluice/actions/workflows/ci.yml/badge.svg)](https://github.com/amanxsays/Sluice/actions/workflows/ci.yml)
+
 A distributed job scheduler and durable task queue, built in Java, purpose-built for rate-limited external API workloads (LLM APIs, third-party services with 429/Retry-After semantics, anything where "just retry immediately" makes things worse).
 
 The name is a sluice gate: it controls the *rate* at which work flows through, not just whether it flows.
 
-> **Status:** actively under development. Weeks 1–4 are complete — schema through a real, benchmarked worker pipeline running via Docker Compose. Week 5 (metrics dashboard, CI) is the remaining work. See [Project status](#project-status--roadmap) for exact detail on what's done vs. still open.
+> **Status:** Weeks 1–5 are complete — schema through a real, benchmarked worker pipeline running via Docker Compose, with live Prometheus/Grafana observability and CI running the full test suite on every push. One item remains open by choice: wiring the reaper and recurring-schedule firing to an actual timer inside the running app — both are fully built and tested, just not yet invoked automatically. See [Project status](#project-status--roadmap) for exact detail.
 
 ---
 
@@ -19,6 +21,7 @@ The name is a sluice gate: it controls the *rate* at which work flows through, n
   - [Concurrent claiming with `SKIP LOCKED`](#concurrent-claiming-with-skip-locked)
   - [Recurring schedules](#recurring-schedules)
   - [Autonomous job processing](#autonomous-job-processing)
+  - [Observability: metrics, Prometheus, and Grafana](#observability-metrics-prometheus-and-grafana)
   - [Schema](#schema)
 - [Tech stack](#tech-stack)
 - [Running it locally](#running-it-locally)
@@ -47,7 +50,9 @@ That question comes directly from calling rate-limited LLM APIs in production �
 - **Recurring schedules.** Cron-expression-driven job templates that spawn fresh executions on a real, computed schedule (via [cron-utils](https://github.com/jmrozanec/cron-utils)), independent of whether any individual spawned job succeeds or fails.
 - **Autonomous worker pool.** A configurable number of background workers claim and process jobs continuously — started automatically when the app boots, no manual triggering.
 - **Rate-limit-aware execution.** A real job handler makes actual HTTP calls to an upstream service; on a 429, it reads the response's own `Retry-After` header and uses that exact value as the backoff — not a guessed exponential delay.
-- **One-command deployment.** The full stack (Postgres, the API + workers, and a mock upstream service) runs via a single `docker compose up --build`, built from source via multi-stage Dockerfiles.
+- **Live observability.** Every `Worker` outcome and job-processing duration is recorded via Micrometer, exposed over HTTP by Spring Boot Actuator, scraped by Prometheus every 5 seconds, and visualized in a real Grafana dashboard — not a mockup of one.
+- **Continuous integration.** The full test suite — including real Testcontainers-backed Postgres tests — runs automatically via GitHub Actions on every push.
+- **One-command deployment.** The full stack (Postgres, the API + workers, a mock upstream service, Prometheus, and Grafana) runs via a single `docker compose up --build`, built from source via multi-stage Dockerfiles.
 - **Measured, not assumed, performance.** A benchmark harness scales workers 1→8 against the mock upstream and records real throughput/p95 latency — see [results](#benchmark-results).
 - **HTTP API** to enqueue jobs (`POST /jobs`).
 
@@ -62,7 +67,7 @@ sluice/
 │   ├── JobSchedulesRepository   # findDueSchedules, fireSchedule
 │   ├── BackoffCalculator        # pure logic: exponential backoff + jitter
 │   ├── CronScheduleCalculator   # pure logic: cron expression → next occurrence
-│   ├── Worker                   # the processing loop: claim → handle → complete/fail
+│   ├── Worker                   # the processing loop: claim → handle → complete/fail (Micrometer-instrumented)
 │   ├── JobHandler                # interface: one job type's actual work
 │   ├── SimulatedApiCallHandler   # a real handler — calls mock-upstream over HTTP
 │   ├── RateLimitedException      # carries a real Retry-After value from upstream
@@ -72,11 +77,13 @@ sluice/
 │   ├── JobsController            # POST /jobs
 │   ├── WorkerStartup             # starts the configured number of Workers on boot
 │   ├── AppConfig                 # bridges Spring's DataSource → core's Spring-free classes
-│   └── application.yml
+│   └── application.yml           # also exposes /actuator/prometheus
 │
 └── mock-upstream/                 # standalone Spring Boot app simulating a rate-limited API
     └── SimulateController          # POST /simulate — configurable latency + 429/Retry-After
 ```
+
+Alongside the modules, at the repo root: `docker-compose.yml` (five services — Postgres, `sluice-api`, `mock-upstream`, Prometheus, Grafana), `prometheus.yml` (scrape config), and `.github/workflows/ci.yml` (GitHub Actions).
 
 **Why the split:** `sluice-core` has no Spring dependency at all — not `spring-jdbc`, not `spring-tx`. It talks to Postgres through plain JDBC with manual transaction control. This means:
 
@@ -94,6 +101,7 @@ flowchart TB
         controller["JobsController<br/>POST /jobs"]
         config["AppConfig<br/>bridges Spring DataSource → core"]
         startup["WorkerStartup<br/>starts N Workers on boot"]
+        actuator["Actuator<br/>/actuator/prometheus"]
     end
 
     subgraph core["sluice-core (plain Java, zero Spring)"]
@@ -101,7 +109,7 @@ flowchart TB
         schedulesRepo["JobSchedulesRepository<br/>findDueSchedules · fireSchedule"]
         backoff["BackoffCalculator"]
         cron["CronScheduleCalculator"]
-        worker["Worker<br/>processOnce · run"]
+        worker["Worker<br/>processOnce · run<br/>(Micrometer counters + timer)"]
         handler["SimulatedApiCallHandler"]
     end
 
@@ -109,6 +117,8 @@ flowchart TB
         simulate["SimulateController<br/>POST /simulate"]
     end
 
+    prom[(Prometheus)]
+    graf[(Grafana)]
     db[(PostgreSQL)]
 
     client -->|JSON| controller
@@ -117,10 +127,13 @@ flowchart TB
     startup -.starts.-> worker
     worker --> jobsRepo
     worker --> handler
+    worker -.records metrics.-> actuator
     handler -->|real HTTP call| simulate
     schedulesRepo -->|delegates spawn| jobsRepo
     jobsRepo --> db
     schedulesRepo --> db
+    prom -->|scrapes every 5s| actuator
+    graf -->|PromQL queries| prom
 ```
 
 ## How it works
@@ -252,6 +265,35 @@ sequenceDiagram
     end
 ```
 
+### Observability: metrics, Prometheus, and Grafana
+
+`Worker` records two things about every job it processes: a counter (`sluice.worker.jobs`, tagged by outcome — `completed`, `failed`, `no_handler`) and a timer (`sluice.worker.job.duration`, wrapped around the handler call in a `try`/`finally` so it captures failed attempts too, not just successful ones). Both are recorded via [Micrometer](https://micrometer.io/) — a framework-agnostic metrics facade, not a Spring library, so this instrumentation lives in `sluice-core` alongside everything else, the same reasoning as using plain Jackson for JSON.
+
+`sluice-api` supplies the concrete, Spring Boot–autoconfigured `MeterRegistry` and exposes it over HTTP via Spring Boot Actuator at `/actuator/prometheus`. Prometheus scrapes that endpoint every 5 seconds and stores the resulting history; Grafana queries Prometheus and renders it as a live dashboard.
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant MR as MeterRegistry (Micrometer)
+    participant A as Actuator (/actuator/prometheus)
+    participant P as Prometheus
+    participant G as Grafana
+
+    W->>MR: counter("sluice.worker.jobs", outcome).increment()
+    W->>MR: timer("sluice.worker.job.duration").record(...)
+
+    loop every 5s
+        P->>A: GET /actuator/prometheus
+        A-->>P: current counter + timer values
+    end
+
+    G->>P: PromQL query, e.g. sluice_worker_jobs_total
+    P-->>G: stored time series
+    G-->>G: renders as a live dashboard panel
+```
+
+Tests and the benchmark harness use `SimpleMeterRegistry` — Micrometer's plain in-memory implementation — so metrics recording is exercised everywhere `Worker` runs, without needing a real Prometheus instance for anything other than the live dashboard itself.
+
 ### Schema
 
 ```mermaid
@@ -299,6 +341,9 @@ erDiagram
 | Database | PostgreSQL 16 |
 | Migrations | Flyway |
 | HTTP client (for real outbound calls) | Java's built-in `java.net.http.HttpClient` |
+| Metrics | [Micrometer](https://micrometer.io/), exposed via Spring Boot Actuator |
+| Metrics storage & dashboards | Prometheus, Grafana |
+| CI | GitHub Actions |
 | Testing | JUnit 5, Testcontainers (real Postgres per test run), plain unit tests for pure-logic classes |
 | Cron parsing | [cron-utils](https://github.com/jmrozanec/cron-utils) |
 | Containerization | Docker, Docker Compose — multi-stage builds from source |
@@ -311,7 +356,7 @@ erDiagram
 docker compose up --build
 ```
 
-Postgres comes up with a healthcheck gating startup order, so `sluice-api` never races it; both `sluice-api` (port 8080) and `mock-upstream` (port 8081) build from their own multi-stage Dockerfiles.
+Postgres comes up with a healthcheck gating startup order, so `sluice-api` never races it; `sluice-api` (port 8080) and `mock-upstream` (port 8081) both build from their own multi-stage Dockerfiles; Prometheus (port 9090) and Grafana (port 3000) start from their official images, no build step needed.
 
 Enqueue a job:
 ```bash
@@ -321,6 +366,10 @@ curl -X POST http://localhost:8080/jobs \
   -d '{"jobType":"call-api","payload":"{\"latencyMs\":200,\"shouldFail\":false,\"retryAfterSeconds\":0}","idempotencyKey":null,"priority":0}'
 ```
 Within about a second, one of the automatically-started background workers claims it, calls `mock-upstream` for real, and marks it completed — no further action needed.
+
+**Watch it happen live:**
+- Prometheus: `http://localhost:9090/targets` — confirm `sluice-api` shows `UP`.
+- Grafana: `http://localhost:3000` (default login `admin` / `admin`) — add Prometheus as a data source at `http://prometheus:9090`, then query `sluice_worker_jobs_total` or `sluice_worker_job_duration_seconds_sum` directly to see real metrics from the jobs you just enqueued.
 
 **Manual / without Docker (for local dev against `sluice-core` changes):**
 ```bash
@@ -337,6 +386,8 @@ mvn -pl sluice-core test
 ```
 
 Requires a running Docker daemon — most tests spin up a disposable Postgres container via Testcontainers per run. The pure-logic test classes (`BackoffCalculatorTest`, `CronScheduleCalculatorTest`) don't touch Docker at all and run in milliseconds.
+
+The same suite runs automatically on every push via [GitHub Actions](.github/workflows/ci.yml) — no Docker Desktop to remember to start; GitHub's runners have Docker available by default. One test, `WorkerTest.processOnceUsesRetryAfterOnRateLimit`, depends on a real `mock-upstream` instance being reachable over HTTP: locally, where it usually is, the test genuinely verifies the `Retry-After` behavior end-to-end; on a bare CI runner where nothing but Postgres is provisioned, it skips cleanly via `Assumptions.assumeTrue(...)` rather than failing — a missing optional dependency and a real regression are different situations and are reported differently on purpose.
 
 ## Benchmark results
 
@@ -369,6 +420,8 @@ A few choices worth calling out, since the reasoning is most of the point of thi
 - **A `Worker.processOnce()` / `run()` split, not one big infinite-loop method.** `processOnce()` does exactly one claim-and-handle cycle and returns a boolean — directly unit-testable, no test can cleanly assert against an infinite loop. `run()` is a thin, effectively untested wrapper that just calls it repeatedly.
 - **`RateLimitedException` as its own type, not a generic catch-all.** A rate-limited failure carries real information — how long the upstream itself wants you to wait — that shouldn't be discarded in favor of a locally-computed guess. A specific exception type, caught before the general handler, is what lets that real signal actually reach `markFailed`.
 - **Multi-stage Dockerfiles, building from source.** A `maven` build stage compiles the full reactor; only the finished jar is copied into a slim `eclipse-temurin` JRE runtime image — the shipped image never carries Maven, the JDK, or source code.
+- **Micrometer lives in `sluice-core`, not `sluice-api`.** Same reasoning as Jackson: it's a framework-agnostic facade, not a Spring library, so `Worker` can record metrics without violating core's zero-Spring rule. `sluice-api` only supplies the concrete, auto-configured registry Spring Boot builds.
+- **A skipped test, not a failing one, when an optional dependency is unavailable.** `WorkerTest`'s rate-limit test needs a real `mock-upstream` reachable over HTTP — genuinely absent on a bare CI runner, not a bug. `Assumptions.assumeTrue(...)` turns that into an honest "couldn't verify here" rather than a false red X.
 
 ## Project status / roadmap
 
@@ -377,4 +430,5 @@ A few choices worth calling out, since the reasoning is most of the point of thi
 - [x] **Week 3 (core logic)** — Idempotency keys, job priorities, `job_schedules` + real cron-based next-run computation, all tested.
 - [ ] **Week 3 (remaining)** — Wire the reaper (`reclaimExpiredLeases`) and `findDueSchedules`/`fireSchedule` to actual recurring timers inside `sluice-api`. Both are fully built and tested, but only ever invoked manually or in tests today.
 - [x] **Week 4** — `Worker`/`JobHandler` processing loop, a real rate-limit-aware handler (`SimulatedApiCallHandler` + `RateLimitedException`), a standalone `mock-upstream` service, workers wired to start automatically in `sluice-api`, the full stack running via Docker Compose (multi-stage builds), and a benchmark measuring real throughput/p95 latency across 1→8 workers — see [results](#benchmark-results).
-- [ ] **Week 5** — Metrics dashboard (Micrometer + Prometheus + Grafana), GitHub Actions CI.
+- [x] **Week 5** — `Worker` instrumented with Micrometer counters and a timer, exposed via Spring Boot Actuator, scraped by Prometheus, and visualized live in a real Grafana dashboard. GitHub Actions CI running the full test suite — including Testcontainers-backed Postgres tests — on every push.
+- [ ] **Deferred by choice** — Port the concurrency, retry, and idempotency patterns learned building Sluice back into the author's other LLM/RAG projects.
