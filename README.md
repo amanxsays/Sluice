@@ -2,11 +2,13 @@
 
 [![CI](https://github.com/amanxsays/Sluice/actions/workflows/ci.yml/badge.svg)](https://github.com/amanxsays/Sluice/actions/workflows/ci.yml)
 
-A distributed job scheduler and durable task queue, built in Java, purpose-built for rate-limited external API workloads (LLM APIs, third-party services with 429/Retry-After semantics, anything where "just retry immediately" makes things worse).
+A PostgreSQL-backed job scheduler and durable task queue, built in Java for rate-limited external API workloads such as LLM APIs and third-party services.
 
-The name is a sluice gate: it controls the *rate* at which work flows through, not just whether it flows.
+Sluice combines proactive outbound rate limiting with reactive HTTP 429 handling. Workers share an in-memory Token Bucket before calling the upstream API, while real upstream rate-limit responses continue to use the existing `Retry-After` retry path.
 
-> **Status:** Weeks 1–5 are complete — schema through a real, benchmarked worker pipeline running via Docker Compose, with live Prometheus/Grafana observability and CI running the full test suite on every push. One item remains open by choice: wiring the reaper and recurring-schedule firing to an actual timer inside the running app — both are fully built and tested, just not yet invoked automatically. See [Project status](#project-status--roadmap) for exact detail.
+The name comes from a sluice gate: it controls the rate at which work flows through.
+
+> **Status:** The queue engine, autonomous worker pool, proactive Token Bucket limiter, reactive retries, Docker Compose stack, and Prometheus/Grafana observability are implemented. The latest local test run completed with **33 tests, 0 failures, 0 errors, and 0 skipped tests**. Automatic reaper scheduling, periodic worker heartbeats, and recurring-schedule timer wiring remain pending. See [Project status / roadmap](#project-status--roadmap).
 
 ---
 
@@ -21,10 +23,12 @@ The name is a sluice gate: it controls the *rate* at which work flows through, n
   - [Concurrent claiming with `SKIP LOCKED`](#concurrent-claiming-with-skip-locked)
   - [Recurring schedules](#recurring-schedules)
   - [Autonomous job processing](#autonomous-job-processing)
+  - [Proactive Token Bucket rate limiting](#proactive-token-bucket-rate-limiting)
   - [Observability: metrics, Prometheus, and Grafana](#observability-metrics-prometheus-and-grafana)
   - [Schema](#schema)
 - [Tech stack](#tech-stack)
 - [Running it locally](#running-it-locally)
+- [Configuration](#configuration)
 - [Running the tests](#running-the-tests)
 - [Benchmark results](#benchmark-results)
 - [Key design decisions](#key-design-decisions)
@@ -34,265 +38,419 @@ The name is a sluice gate: it controls the *rate* at which work flows through, n
 
 ## Why this exists
 
-Most "backend" side projects are wiring: call this API, save the result, call that API. Sluice is deliberately not that. It exists to answer a narrower, harder question: **what actually happens when a worker dies in the middle of doing something, and how do you build a system that survives that without losing work or doing it twice?**
+Calling an external API becomes a queueing problem when requests must survive process failures, wait through provider rate limits, and retry without overwhelming the upstream service.
 
-That question comes directly from calling rate-limited LLM APIs in production — retries, backoff, and "did that request actually succeed before the process died" are not hypothetical problems there. Sluice is the queue that problem deserves, built from first principles on top of plain Postgres rather than bolted onto an existing message broker.
+Sluice explores those concerns through a durable PostgreSQL queue:
+
+- How can concurrent workers claim different jobs safely?
+- How can unfinished work be recovered after a worker crashes?
+- How should retries respect an upstream service's `Retry-After` response?
+- How can workers proactively control outbound traffic before receiving a 429?
+- How can local throttling defer work without exhausting its failure budget?
+
+The queue is built directly on PostgreSQL. Job persistence, claiming, retry scheduling, and recovery primitives are implemented explicitly so their behavior can be inspected and tested.
+
+Duplicate submission and duplicate execution are separate concerns. Sluice's enqueue idempotency keys prevent duplicate queue rows. Handlers still need appropriate idempotency for external side effects if a job executes more than once.
 
 ## Features
 
-- **Postgres-backed queue.** No message broker — durability comes from the database itself.
-- **Safe concurrent claiming.** Multiple worker processes compete for jobs via `SELECT ... FOR UPDATE SKIP LOCKED`, proven under real multi-threaded contention (not just unit tests).
-- **At-least-once delivery.** Time-boxed leases + worker heartbeats + a reaper that reclaims jobs from workers that die silently.
-- **Retries with exponential backoff + full jitter.** Failures don't retry instantly or in lockstep with every other failed job.
-- **Dead letter queue.** Jobs that exceed a max-attempts threshold stop retrying automatically — via *either* an explicit failure report or a silent worker crash.
-- **Idempotency keys.** Enforced atomically at the database level (`ON CONFLICT ... DO NOTHING`) — a duplicate submission returns the original job, never a second row, even under concurrent requests.
-- **Job priorities.** Higher-priority jobs are claimed first; equal-priority jobs still respect arrival order.
-- **Recurring schedules.** Cron-expression-driven job templates that spawn fresh executions on a real, computed schedule (via [cron-utils](https://github.com/jmrozanec/cron-utils)), independent of whether any individual spawned job succeeds or fails.
-- **Autonomous worker pool.** A configurable number of background workers claim and process jobs continuously — started automatically when the app boots, no manual triggering.
-- **Rate-limit-aware execution.** A real job handler makes actual HTTP calls to an upstream service; on a 429, it reads the response's own `Retry-After` header and uses that exact value as the backoff — not a guessed exponential delay.
-- **Live observability.** Every `Worker` outcome and job-processing duration is recorded via Micrometer, exposed over HTTP by Spring Boot Actuator, scraped by Prometheus every 5 seconds, and visualized in a real Grafana dashboard — not a mockup of one.
-- **Continuous integration.** The full test suite — including real Testcontainers-backed Postgres tests — runs automatically via GitHub Actions on every push.
-- **One-command deployment.** The full stack (Postgres, the API + workers, a mock upstream service, Prometheus, and Grafana) runs via a single `docker compose up --build`, built from source via multi-stage Dockerfiles.
-- **Measured, not assumed, performance.** A benchmark harness scales workers 1→8 against the mock upstream and records real throughput/p95 latency — see [results](#benchmark-results).
-- **HTTP API** to enqueue jobs (`POST /jobs`).
+- **PostgreSQL-backed queue.** Job durability comes from the database.
+- **Safe concurrent claiming.** Workers use `SELECT ... FOR UPDATE SKIP LOCKED` to claim available jobs without taking the same row.
+- **Crash-recovery primitives.** Leases, heartbeat updates, and expired-lease reclamation are implemented and tested. Automatic timer wiring is tracked in the roadmap.
+- **Retries with exponential backoff and full jitter.** General handler failures are rescheduled through the existing retry mechanism.
+- **Dead-letter handling.** Jobs that exhaust their failure budget stop retrying automatically.
+- **Idempotent enqueueing.** A database uniqueness constraint and `ON CONFLICT ... DO NOTHING` prevent duplicate submissions with the same idempotency key.
+- **Priority-aware claiming.** Higher-priority jobs are selected before lower-priority jobs, followed by creation time.
+- **Recurring schedule support.** Cron-based templates create ordinary jobs independently of previous executions. Repository logic is implemented; timer-driven firing remains pending.
+- **Autonomous worker pool.** Configurable background workers start when `sluice-api` boots.
+- **Proactive outbound rate limiting.** All `call-api` workers started by one application instance share a configurable in-memory Token Bucket.
+- **Deferral without spending attempts.** An empty local bucket returns a job to `pending` with a future `available_at`, preserving its failed-attempt count.
+- **Reactive HTTP 429 handling.** Actual upstream 429 responses retain their existing `Retry-After` scheduling behavior.
+- **Live observability.** Micrometer counters and timers are exposed through Spring Boot Actuator, scraped by Prometheus, and available to Grafana.
+- **Automated tests and CI.** Pure Java unit tests and PostgreSQL integration tests run through Maven and the GitHub Actions workflow.
+- **One-command deployment.** Docker Compose starts PostgreSQL, the API and workers, mock upstream, Prometheus, and Grafana.
+- **Benchmark harness.** Worker scaling can be measured against the mock upstream. Existing results are an unthrottled baseline.
+- **HTTP enqueue API.** Submit jobs through `POST /jobs`.
 
 ## Architecture
 
-Three Maven modules, split deliberately along a hard boundary:
+Sluice has three Maven modules:
 
-```
-sluice/
-├── sluice-core/                 # queue engine — plain Java, zero Spring dependencies
-│   ├── JobsRepository           # enqueue, claim, heartbeat, reclaim, markFailed, markCompleted, findById...
-│   ├── JobSchedulesRepository   # findDueSchedules, fireSchedule
-│   ├── BackoffCalculator        # pure logic: exponential backoff + jitter
-│   ├── CronScheduleCalculator   # pure logic: cron expression → next occurrence
-│   ├── Worker                   # the processing loop: claim → handle → complete/fail (Micrometer-instrumented)
-│   ├── JobHandler                # interface: one job type's actual work
-│   ├── SimulatedApiCallHandler   # a real handler — calls mock-upstream over HTTP
-│   ├── RateLimitedException      # carries a real Retry-After value from upstream
-│   └── db/migration/            # Flyway SQL migrations (travel to sluice-api via classpath)
-│
-├── sluice-api/                   # Spring Boot HTTP + wiring layer
-│   ├── JobsController            # POST /jobs
-│   ├── WorkerStartup             # starts the configured number of Workers on boot
-│   ├── AppConfig                 # bridges Spring's DataSource → core's Spring-free classes
-│   └── application.yml           # also exposes /actuator/prometheus
-│
-└── mock-upstream/                 # standalone Spring Boot app simulating a rate-limited API
-    └── SimulateController          # POST /simulate — configurable latency + 429/Retry-After
-```
+| Module | Responsibility |
+|---|---|
+| `sluice-core` | Queue engine, repositories, worker loop, retry logic, token bucket, and metrics instrumentation |
+| `sluice-api` | Spring Boot HTTP API, configuration, dependency wiring, and worker startup |
+| `mock-upstream` | Standalone HTTP service that simulates latency and HTTP 429 responses |
 
-Alongside the modules, at the repo root: `docker-compose.yml` (five services — Postgres, `sluice-api`, `mock-upstream`, Prometheus, Grafana), `prometheus.yml` (scrape config), and `.github/workflows/ci.yml` (GitHub Actions).
+Important components:
 
-**Why the split:** `sluice-core` has no Spring dependency at all — not `spring-jdbc`, not `spring-tx`. It talks to Postgres through plain JDBC with manual transaction control. This means:
+| Module | Component | Responsibility |
+|---|---|---|
+| `sluice-core` | `JobsRepository` | Enqueue, claim, heartbeat, reclaim expired leases, defer locally throttled jobs, record failures, and complete jobs |
+| `sluice-core` | `JobSchedulesRepository` | Find due schedules and create their job executions |
+| `sluice-core` | `BackoffCalculator` | Exponential backoff with jitter |
+| `sluice-core` | `CronScheduleCalculator` | Calculate the next cron occurrence |
+| `sluice-core` | `Worker` | Claim a job, invoke its handler, and complete, defer, or retry it |
+| `sluice-core` | `JobHandler` | Interface for job-specific work |
+| `sluice-core` | `TokenBucket` | Thread-safe in-memory admission control for outbound calls |
+| `sluice-core` | `SimulatedApiCallHandler` | Make HTTP calls to the mock upstream and interpret responses |
+| `sluice-core` | `RateLimitedException` | Carry a retry delay and distinguish local throttling from upstream 429 |
+| `sluice-api` | `JobsController` | Handle `POST /jobs` |
+| `sluice-api` | `WorkerStartup` | Create one shared bucket and handler map, then start the workers |
+| `sluice-api` | `AppConfig` | Construct core repositories using Spring's `DataSource` |
+| `mock-upstream` | `SimulateController` | Handle `POST /simulate` with configurable latency and 429 behavior |
 
-- Every concurrency and correctness test runs against real Postgres (via Testcontainers) with zero Spring context needed — fast, focused, nothing to configure.
-- The dependency direction is enforced by Maven itself, not just convention — `sluice-core` physically cannot import anything from `sluice-api`.
-- `sluice-core` could be extracted as a standalone library later with no rewriting.
+Flyway migrations live in `sluice-core/src/main/resources/db/migration` and are available to `sluice-api` through its dependency on core.
 
-`sluice-api` is the only place that knows both worlds exist — `AppConfig` is the seam: Spring builds a `DataSource` from `application.yml`, and hands it to `JobsRepository`'s plain constructor. `mock-upstream` is a third, fully independent module — it never depends on `sluice-core` at all — standing in for a real, rate-limited third-party API so benchmarks never have to hit anything real or paid.
+The repository root also contains:
+
+- `docker-compose.yml`
+- `prometheus.yml`
+- `.github/workflows/ci.yml`
+- `sluice-benchmark-results.png`
+
+### Module boundaries
+
+`sluice-core` uses plain Java and JDBC and has no Spring dependency. Its repositories, token bucket, and workers can be tested without starting a Spring application context.
+
+`sluice-api` supplies configuration, the `DataSource`, and the concrete `MeterRegistry`. `WorkerStartup` connects these components and creates the shared token bucket before starting worker threads.
+
+`mock-upstream` is an independent Spring Boot application. Tests and benchmarks can exercise actual HTTP behavior without calling a paid external service.
 
 ```mermaid
 flowchart TB
-    client([HTTP client])
+    client["HTTP client"] --> controller["JobsController"]
+    controller --> repository["JobsRepository"]
+    repository --> database[("PostgreSQL")]
 
-    subgraph api["sluice-api (Spring Boot)"]
-        controller["JobsController<br/>POST /jobs"]
-        config["AppConfig<br/>bridges Spring DataSource → core"]
-        startup["WorkerStartup<br/>starts N Workers on boot"]
-        actuator["Actuator<br/>/actuator/prometheus"]
-    end
+    startup["WorkerStartup"] --> workers["Worker pool"]
+    startup -. "Creates one bucket" .-> bucket{"Shared TokenBucket"}
 
-    subgraph core["sluice-core (plain Java, zero Spring)"]
-        jobsRepo["JobsRepository<br/>enqueue · claim · heartbeat<br/>reclaimExpiredLeases · markFailed · markCompleted"]
-        schedulesRepo["JobSchedulesRepository<br/>findDueSchedules · fireSchedule"]
-        backoff["BackoffCalculator"]
-        cron["CronScheduleCalculator"]
-        worker["Worker<br/>processOnce · run<br/>(Micrometer counters + timer)"]
-        handler["SimulatedApiCallHandler"]
-    end
-
-    subgraph mock["mock-upstream (Spring Boot)"]
-        simulate["SimulateController<br/>POST /simulate"]
-    end
-
-    prom[(Prometheus)]
-    graf[(Grafana)]
-    db[(PostgreSQL)]
-
-    client -->|JSON| controller
-    controller --> jobsRepo
-    config -.constructs.-> jobsRepo
-    startup -.starts.-> worker
-    worker --> jobsRepo
-    worker --> handler
-    worker -.records metrics.-> actuator
-    handler -->|real HTTP call| simulate
-    schedulesRepo -->|delegates spawn| jobsRepo
-    jobsRepo --> db
-    schedulesRepo --> db
-    prom -->|scrapes every 5s| actuator
-    graf -->|PromQL queries| prom
+    workers --> repository
+    workers --> bucket
+    bucket -- "Token acquired" --> handler["SimulatedApiCallHandler"]
+    bucket -- "Empty: defer job" --> repository
+    handler --> upstream["Mock upstream API"]
 ```
+
+The database coordinates job ownership. The token bucket coordinates outbound admission within the current application instance.
 
 ## How it works
 
 ### Job lifecycle
 
-Every job moves through a small set of states. Retries loop back to `pending`; a job that exceeds its attempt budget — however it failed — lands in `dead_letter` and stops retrying automatically.
+Jobs begin in `pending`, become `claimed` when a worker acquires them, and move to `completed` after successful handling.
+
+An actual failure increments `attempts` and either schedules a retry or moves the job to `dead_letter`.
+
+Local token-bucket rejection follows a separate path: the job returns to `pending` with a future availability time, but its attempt count does not change.
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending : enqueue()
 
-    pending --> claimed : claim()\n(SKIP LOCKED, priority DESC, created_at ASC)
+    pending --> claimed : claim an available job
 
-    claimed --> completed : worker succeeds
-    claimed --> pending : markFailed()\n(attempts < max) — backoff delay applied
-    claimed --> pending : reaper reclaims\n(lease expired, attempts < max)
-    claimed --> dead_letter : markFailed()\n(attempts ≥ max)
-    claimed --> dead_letter : reaper reclaims\n(lease expired, attempts ≥ max)
+    claimed --> completed : handler succeeds
+
+    claimed --> pending : local throttle; attempts unchanged
+    claimed --> pending : failure; retry budget remains
+    claimed --> pending : expired lease reclaimed; budget remains
+
+    claimed --> dead_letter : failure budget exhausted
+    claimed --> dead_letter : lease reclamation exhausts budget
 
     completed --> [*]
     dead_letter --> [*]
 ```
 
+The existing claim query selects only jobs whose status is `pending` and whose `available_at` is due. Both ordinary retries and local rate-limit deferrals use this mechanism.
+
 ### Crash recovery: leases, heartbeats, and the reaper
 
-This is the core problem the project exists to solve. A claimed job gets a **lease** — a deadline, not a permanent hold. A live worker **renews** its lease periodically via heartbeats. If a worker dies, its lease simply expires, and a separate **reaper** process reclaims the job so someone else can pick it up.
+A claimed job receives a lease deadline. The repository provides:
+
+- `heartbeat(...)` to extend an owned job's lease.
+- `reclaimExpiredLeases(...)` to release expired claims and account for failed attempts.
+
+These primitives support recovery when a worker disappears without reporting a result.
+
+**Current integration status:** the running worker does not yet send periodic heartbeats, and the application does not automatically invoke the reaper on a timer. The recovery flow below describes the implemented repository behavior when reclamation is invoked.
 
 ```mermaid
 sequenceDiagram
     participant A as Worker A
-    participant DB as Postgres (jobs)
-    participant R as Reaper
+    participant DB as PostgreSQL
+    participant R as Reaper invocation
     participant B as Worker B
 
-    A->>DB: claim() → status='claimed',<br/>lease_expires_at = now()+30s
-    DB-->>A: Job #42
+    A->>DB: claim a job with a lease
+    DB-->>A: Claimed job
 
-    Note over A: Worker A crashes<br/>mid-processing
+    Note over A: Worker crashes before recording completion
+    Note over DB: Lease expires
 
-    Note over DB: 30s pass, no heartbeat,<br/>lease_expires_at < now()
+    R->>DB: reclaimExpiredLeases(maxAttempts)
+    DB-->>R: Reset to pending or move to dead_letter
 
-    loop runs on a timer
-        R->>DB: reclaimExpiredLeases(maxAttempts)
-    end
-    DB-->>R: #42 reset → status='pending',<br/>attempts += 1, claimed_by = NULL
-
-    B->>DB: claim()
-    DB-->>B: Job #42
-    Note over B: idempotency_key protects<br/>against duplicate side effects
+    B->>DB: claim an available job
+    DB-->>B: Recovered job
+    Note over B: Handler must tolerate repeated execution
 ```
+
+Recovery can repeat work if the upstream side effect succeeded before the worker crashed. Enqueue idempotency keys do not, by themselves, prevent repeated external side effects.
 
 ### Concurrent claiming with `SKIP LOCKED`
 
-Two workers polling at the same instant must never claim the same row. A naive `SELECT ... FOR UPDATE` would make the second worker *block* until the first commits — correct, but serializes every claim. `SKIP LOCKED` lets the second worker skip the locked row entirely and grab the next one instead, so both proceed genuinely in parallel.
+The claim operation selects an eligible job and updates its ownership in one SQL statement.
+
+`FOR UPDATE SKIP LOCKED` allows another worker to skip a row that is already locked and claim another eligible job instead of waiting for that row.
 
 ```mermaid
 sequenceDiagram
     participant A as Worker A
     participant B as Worker B
-    participant DB as Postgres
+    participant DB as PostgreSQL
 
-    par Worker A
-        A->>DB: SELECT ... FOR UPDATE SKIP LOCKED
-        DB-->>A: locks row #7
-    and Worker B (same instant)
-        B->>DB: SELECT ... FOR UPDATE SKIP LOCKED
-        Note over DB: row #7 already locked → skipped
-        DB-->>B: locks row #8 instead
+    par Worker A claims
+        A->>DB: claim() selects and locks row 7
+        DB-->>A: Job 7 marked claimed
+    and Worker B claims
+        B->>DB: claim() skips locked rows
+        DB-->>B: Job 8 marked claimed
     end
-
-    A->>DB: UPDATE #7 SET status='claimed'
-    B->>DB: UPDATE #8 SET status='claimed'
 ```
 
-Proven directly by a test that runs 4 threads against 20 seeded jobs and asserts every claimed id is unique — not just that claiming "works," but that it's safe under real thread contention.
+An existing concurrency test runs four threads against 20 seeded jobs and verifies that every claimed job ID is unique.
 
 ### Recurring schedules
 
-A `job_schedules` row is a *template*, decoupled from any single execution. A schedule firing spawns a normal job via the existing `enqueue` path — so whether that spawned job later succeeds, fails, or gets dead-lettered has **zero effect** on whether the *next* occurrence gets scheduled.
+A row in `job_schedules` is a template for future executions. Firing a schedule creates an ordinary job through the enqueue path and advances the schedule's next occurrence.
+
+The spawned job's success or failure is separate from the schedule's future occurrences.
 
 ```mermaid
 sequenceDiagram
-    participant S as Scheduler (not yet wired to a timer)
+    participant S as Scheduler invocation
     participant SR as JobSchedulesRepository
     participant JR as JobsRepository
-    participant DB as Postgres
+    participant DB as PostgreSQL
 
     S->>SR: findDueSchedules()
-    SR->>DB: SELECT ... WHERE enabled AND next_run_at <= now()
-    DB-->>SR: [schedule]
+    SR->>DB: Find enabled schedules that are due
+    DB-->>SR: Due schedules
+    SR-->>S: Schedules
 
-    S->>S: CronScheduleCalculator.nextRunAfter(cron, now)
+    S->>S: Calculate next occurrence
     S->>SR: fireSchedule(schedule, jobsRepo, nextRunAt)
     SR->>JR: enqueue(jobType, payload, null, priority)
-    JR->>DB: INSERT INTO jobs ... RETURNING *
-    SR->>DB: UPDATE job_schedules SET next_run_at = ?
+    JR->>DB: Insert job
+    SR->>DB: Update next_run_at
 ```
 
-> The mechanism above is fully built and tested. What's **not** built yet: anything that actually calls it on a real timer — see [status](#project-status--roadmap).
+The repository and cron calculation logic are implemented and tested. Automatic timer-driven invocation remains pending.
 
 ### Autonomous job processing
 
-`Worker` is the piece that turns the queue from "a set of methods proven correct in isolation" into a system that actually does work on its own. Each `Worker` runs on its own background thread, started automatically by `WorkerStartup` when `sluice-api` boots — no test harness, no manual trigger. `JobHandler` is the seam between the generic polling loop and job-type-specific work; `SimulatedApiCallHandler` is the one real handler currently wired in, making genuine HTTP calls to `mock-upstream` rather than simulating anything in-process.
+Each `Worker` runs on a background thread started by `WorkerStartup`.
 
-```mermaid
-sequenceDiagram
-    participant W as Worker (background thread)
-    participant JR as JobsRepository
-    participant H as SimulatedApiCallHandler
-    participant M as mock-upstream
+`processOnce()` performs one claim-and-handle cycle. `run()` repeatedly invokes it. When no eligible job is available, the existing loop sleeps for two seconds before polling again.
 
-    loop polls continuously
-        W->>JR: claim(workerId, leaseSeconds)
-    end
-    JR-->>W: Job (or empty — sleep and retry)
-
-    W->>H: handle(job)
-    H->>M: POST /simulate (real HTTP call)
-
-    alt 200 OK
-        M-->>H: Success
-        W->>JR: markCompleted(job.id(), workerId)
-    else 429 + Retry-After
-        M-->>H: 429, Retry-After: N
-        H-->>W: throws RateLimitedException(N)
-        W->>JR: markFailed(job.id(), workerId, N, maxAttempts)
-        Note over W,JR: uses the server's own N seconds directly — not BackoffCalculator's guess
-    end
-```
-
-### Observability: metrics, Prometheus, and Grafana
-
-`Worker` records two things about every job it processes: a counter (`sluice.worker.jobs`, tagged by outcome — `completed`, `failed`, `no_handler`) and a timer (`sluice.worker.job.duration`, wrapped around the handler call in a `try`/`finally` so it captures failed attempts too, not just successful ones). Both are recorded via [Micrometer](https://micrometer.io/) — a framework-agnostic metrics facade, not a Spring library, so this instrumentation lives in `sluice-core` alongside everything else, the same reasoning as using plain Jackson for JSON.
-
-`sluice-api` supplies the concrete, Spring Boot–autoconfigured `MeterRegistry` and exposes it over HTTP via Spring Boot Actuator at `/actuator/prometheus`. Prometheus scrapes that endpoint every 5 seconds and stores the resulting history; Grafana queries Prometheus and renders it as a live dashboard.
+For `call-api` jobs, the registered handler first checks the shared bucket and then invokes `SimulatedApiCallHandler`.
 
 ```mermaid
 sequenceDiagram
     participant W as Worker
-    participant MR as MeterRegistry (Micrometer)
-    participant A as Actuator (/actuator/prometheus)
+    participant JR as JobsRepository
+    participant TB as Shared TokenBucket
+    participant H as Upstream handler
+    participant U as Mock upstream
+
+    W->>JR: claim(workerId, leaseSeconds)
+    JR-->>W: Job
+    W->>TB: acquireOrThrow()
+
+    alt Bucket empty
+        TB-->>W: Local RateLimitedException(delay)
+        W->>JR: deferRateLimited(jobId, workerId, delay)
+        Note over W,JR: Return to pending without incrementing attempts
+    else Token acquired
+        TB-->>W: Permit
+        W->>H: handle(job)
+        H->>U: POST /simulate
+
+        alt HTTP 200
+            U-->>H: Success
+            H-->>W: Return
+            W->>JR: markCompleted(jobId, workerId)
+        else HTTP 429
+            U-->>H: Retry-After response
+            H-->>W: RateLimitedException(retryAfter)
+            W->>JR: markFailed with upstream delay
+        else Other handler failure
+            H-->>W: Exception
+            W->>JR: markFailed with calculated backoff
+        end
+    end
+```
+
+A `true` result from `processOnce()` means a job was claimed and processed through one of these paths. It does not necessarily mean that the job completed successfully.
+
+### Proactive Token Bucket rate limiting
+
+The limiter controls outbound API-call admission before workers invoke the upstream handler.
+
+It supports:
+
+- Configurable capacity.
+- Configurable refill rate per second.
+- Controlled bursts.
+- Fractional token refill.
+- Thread-safe acquisition.
+- Monotonic elapsed-time calculation using `System.nanoTime()`.
+- Rescheduling when empty without waiting for token refill.
+
+#### One bucket shared by the worker pool
+
+`WorkerStartup.run()` creates the bucket and handler wrapper before entering the worker creation loop:
+
+```java
+TokenBucket bucket = new TokenBucket(bucketCapacity, refillPerSecond);
+JobHandler upstreamHandler = new SimulatedApiCallHandler(mockUpstreamUrl);
+
+JobHandler limitedHandler = job -> {
+    bucket.acquireOrThrow();
+    upstreamHandler.handle(job);
+};
+
+Map<String, JobHandler> handlers = Map.of("call-api", limitedHandler);
+```
+
+Every worker receives the same handler map. The wrapper captures the same bucket instance, so adding worker threads does not create additional independent allowances.
+
+If acquisition throws, execution never reaches `upstreamHandler.handle(job)`.
+
+#### Refill and acquisition
+
+The bucket starts full. On each acquisition attempt, it calculates the tokens earned since its previous accounting update:
+
+```text
+availableTokens = min(
+    capacity,
+    availableTokens + elapsedSeconds * refillPerSecond
+)
+```
+
+There is no scheduled refill task. Tokens are replenished lazily when acquisition is attempted.
+
+Refill, checking, and consumption occur inside one synchronized method. HTTP execution happens after this method releases its lock.
+
+One successful acquisition consumes one token. Tokens represent API-call permits, not LLM input or output tokens.
+
+#### Deferral when empty
+
+When fewer than one token is available, the bucket calculates a retry delay from the missing token balance and refill rate.
+
+The existing queue schedules retries in whole seconds, so the delay rounds upward and is at least one second.
+
+`RateLimitedException.localThrottle(delay)` identifies a local admission rejection. `Worker` routes it to:
+
+```java
+jobsRepository.deferRateLimited(job.id(), workerId, delay);
+```
+
+The database update:
+
+- Returns the job to `pending`.
+- Sets a future `available_at`.
+- Clears `claimed_by`, `claimed_at`, and `lease_expires_at`.
+- Updates `updated_at`.
+- Preserves `attempts`.
+- Applies only if the specified worker still owns a job in `claimed` state.
+
+This prevents a healthy job from exhausting its failure budget merely because other jobs consumed the available tokens.
+
+The worker does not sleep for the token delay. It can immediately process other eligible work.
+
+#### Proactive and reactive behavior
+
+| Situation | Scheduling behavior | Failed attempts |
+|---|---|---|
+| Token available, handler succeeds | Mark completed | Unchanged |
+| Local bucket empty | Defer using `available_at` | Unchanged |
+| Actual upstream HTTP 429 | Existing `Retry-After` retry path | Incremented |
+| Other handler exception | Existing backoff calculation | Incremented |
+
+The existing `RateLimitedException(int retryAfterSeconds)` constructor continues to represent an upstream rate-limit response.
+
+`SimulatedApiCallHandler` still expects an integer-seconds `Retry-After` header and falls back to one second when the header is absent. HTTP-date values are not currently supported.
+
+#### Scope and limitations
+
+- **Single application instance:** workers started by one `WorkerStartup` share one bucket. Another JVM would have an independent allowance.
+- **In-memory state:** restarting the application creates a fresh, full bucket.
+- **One shared allowance:** all wrapped `call-api` jobs use the same bucket; there are no separate per-tenant or per-provider buckets.
+- **Whole-second deferrals:** retry scheduling is coarser than the bucket's elapsed-time accounting.
+- **Polling affects throughput:** the existing idle polling interval can add further delay.
+- **No future reservation:** a deferred job must acquire a token again when it becomes eligible.
+- **No token refund:** a consumed token remains consumed if the handler later fails.
+- **Rate and concurrency differ:** bucket settings control admission rate; worker count controls concurrent execution.
+- **Reactive 429 remains per job:** a 429 reschedules that job; it does not change the bucket's refill rate or impose a shared cooldown.
+
+A globally coordinated limiter for multiple application instances remains future work.
+
+### Observability: metrics, Prometheus, and Grafana
+
+`Worker` records metrics through Micrometer in `sluice-core`.
+
+The counter `sluice.worker.jobs` uses these outcome tags:
+
+| Outcome | Meaning |
+|---|---|
+| `completed` | The handler completed and the worker followed its completion path |
+| `failed` | An upstream 429 or another handler exception followed the existing failure path |
+| `deferred` | A locally throttled job was successfully rescheduled without consuming an attempt |
+| `no_handler` | No handler was registered for the job type |
+
+These are processing counters, not a count of unique submissions. In the existing worker implementation, a missing handler records `no_handler` and then follows the general failure path, which also records `failed`.
+
+`sluice.worker.job.duration` measures the timed handler/completion block after a claim. It also records attempts rejected by the local bucket. It does not measure the job's total waiting time in the queue.
+
+`sluice-api` supplies the concrete `MeterRegistry` and exposes metrics at `/actuator/prometheus`. Prometheus scrapes this endpoint every five seconds, and Grafana queries the stored series.
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant MR as MeterRegistry
+    participant A as Actuator
     participant P as Prometheus
     participant G as Grafana
 
-    W->>MR: counter("sluice.worker.jobs", outcome).increment()
-    W->>MR: timer("sluice.worker.job.duration").record(...)
+    W->>MR: Increment outcome counter
+    W->>MR: Record processing duration
 
-    loop every 5s
+    loop Every 5 seconds
         P->>A: GET /actuator/prometheus
-        A-->>P: current counter + timer values
+        A-->>P: Counter and timer values
     end
 
-    G->>P: PromQL query, e.g. sluice_worker_jobs_total
-    P-->>G: stored time series
-    G-->>G: renders as a live dashboard panel
+    G->>P: Query metrics
+    P-->>G: Time series
 ```
 
-Tests and the benchmark harness use `SimpleMeterRegistry` — Micrometer's plain in-memory implementation — so metrics recording is exercised everywhere `Worker` runs, without needing a real Prometheus instance for anything other than the live dashboard itself.
+Example PromQL for completed processing rate:
+
+```promql
+sum(rate(sluice_worker_jobs_total{outcome="completed"}[1m]))
+```
+
+Example PromQL for local deferral rate:
+
+```promql
+sum(rate(sluice_worker_jobs_total{outcome="deferred"}[1m]))
+```
+
+Tests and the benchmark harness use `SimpleMeterRegistry`, so worker instrumentation can be exercised without running Prometheus.
 
 ### Schema
 
@@ -326,75 +484,240 @@ erDiagram
         timestamptz updated_at
     }
 
-    JOB_SCHEDULES ||--o{ JOBS : "spawns via fireSchedule (no stored FK)"
+    JOB_SCHEDULES ||--o{ JOBS : "spawns via fireSchedule; no stored FK"
 ```
 
-`status` is `TEXT` + a `CHECK` constraint (`pending`, `claimed`, `completed`, `failed`, `dead_letter`) rather than a Postgres `ENUM` — see [design decisions](#key-design-decisions).
+`status` is `TEXT` with a `CHECK` constraint allowing `pending`, `claimed`, `completed`, `failed`, and `dead_letter`.
+
+The worker's retry paths use `pending` and `dead_letter`; local deferral uses `pending`.
+
+The Token Bucket feature requires no schema migration. It reuses the existing claim, availability, and attempt-tracking columns.
 
 ## Tech stack
 
-| | |
+| Component | Technology |
 |---|---|
 | Language | Java 21 |
-| Web framework | Spring Boot 4.1.1 (`sluice-api`, `mock-upstream`) |
-| Database access | Plain JDBC (`sluice-core`) — no ORM, explicit transaction control |
+| Web framework | Spring Boot 4.1.1 |
+| Database access | Plain JDBC in `sluice-core` |
 | Database | PostgreSQL 16 |
 | Migrations | Flyway |
-| HTTP client (for real outbound calls) | Java's built-in `java.net.http.HttpClient` |
-| Metrics | [Micrometer](https://micrometer.io/), exposed via Spring Boot Actuator |
-| Metrics storage & dashboards | Prometheus, Grafana |
+| Outbound HTTP | Java's built-in `java.net.http.HttpClient` |
+| Proactive rate limiting | In-memory Token Bucket using `System.nanoTime()` and synchronized acquisition |
+| Metrics | [Micrometer](https://micrometer.io/) and Spring Boot Actuator |
+| Metrics storage and dashboards | Prometheus and Grafana |
 | CI | GitHub Actions |
-| Testing | JUnit 5, Testcontainers (real Postgres per test run), plain unit tests for pure-logic classes |
+| Testing | JUnit Jupiter, Testcontainers, controllable-clock unit tests, and a local HTTP test server |
 | Cron parsing | [cron-utils](https://github.com/jmrozanec/cron-utils) |
-| Containerization | Docker, Docker Compose — multi-stage builds from source |
+| Containerization | Docker and Docker Compose with multi-stage builds |
 
 ## Running it locally
 
-**With Docker Compose (recommended)** — builds everything from source and starts the full stack, networked together, in one command:
+### Full stack with Docker Compose
+
+From the repository root:
 
 ```bash
 docker compose up --build
 ```
 
-Postgres comes up with a healthcheck gating startup order, so `sluice-api` never races it; `sluice-api` (port 8080) and `mock-upstream` (port 8081) both build from their own multi-stage Dockerfiles; Prometheus (port 9090) and Grafana (port 3000) start from their official images, no build step needed.
+This builds the Java services from source and starts:
+
+| Service | Host port |
+|---|---|
+| PostgreSQL | `5432` |
+| Sluice API | `8080` |
+| Mock upstream | `8081` |
+| Prometheus | `9090` |
+| Grafana | `3000` |
+
+PostgreSQL has a health check, and the API waits for it to become healthy.
 
 Enqueue a job:
+
 ```bash
-# a job the real handler processes end-to-end — calls mock-upstream over HTTP
 curl -X POST http://localhost:8080/jobs \
   -H "Content-Type: application/json" \
   -d '{"jobType":"call-api","payload":"{\"latencyMs\":200,\"shouldFail\":false,\"retryAfterSeconds\":0}","idempotencyKey":null,"priority":0}'
 ```
-Within about a second, one of the automatically-started background workers claims it, calls `mock-upstream` for real, and marks it completed — no further action needed.
 
-**Watch it happen live:**
-- Prometheus: `http://localhost:9090/targets` — confirm `sluice-api` shows `UP`.
-- Grafana: `http://localhost:3000` (default login `admin` / `admin`) — add Prometheus as a data source at `http://prometheus:9090`, then query `sluice_worker_jobs_total` or `sluice_worker_job_duration_seconds_sum` directly to see real metrics from the jobs you just enqueued.
+A background worker claims the job when it is eligible. If the shared bucket permits the call, the worker invokes mock upstream and completes the job on success. If the bucket is empty, the worker defers the job.
 
-**Manual / without Docker (for local dev against `sluice-core` changes):**
+Completion time depends on queue load, token availability, polling, and upstream latency.
+
+To exercise reactive HTTP 429 handling:
+
 ```bash
-docker run --name sluice-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16-alpine
+curl -X POST http://localhost:8080/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"jobType":"call-api","payload":"{\"latencyMs\":0,\"shouldFail\":true,\"retryAfterSeconds\":7}","idempotencyKey":null,"priority":0}'
+```
+
+When admitted by the bucket, this job receives a 429 from mock upstream and follows the existing seven-second retry path. Because its payload keeps requesting failure, later admitted attempts also fail until the configured attempt budget is exhausted.
+
+### Observe the application
+
+- Prometheus targets: `http://localhost:9090/targets`
+- Grafana: `http://localhost:3000`
+- Application metrics: `http://localhost:8080/actuator/prometheus`
+
+For a fresh Grafana instance, the default credentials are `admin` / `admin`. Add Prometheus as a data source using `http://prometheus:9090`.
+
+Useful series include:
+
+- `sluice_worker_jobs_total`
+- `sluice_worker_job_duration_seconds_sum`
+- `sluice_worker_job_duration_seconds_count`
+
+Filter the outcome counter by `deferred` to observe local throttling separately from failures.
+
+### Run the Java services with Maven
+
+For local development, use JDK 21 and Maven, with Docker available for PostgreSQL and integration tests.
+
+Start PostgreSQL and build the project:
+
+```bash
+docker compose up -d postgres
 mvn install
+```
+
+In one terminal, start mock upstream:
+
+```bash
+mvn -pl mock-upstream spring-boot:run
+```
+
+In another terminal, start the API and workers:
+
+```bash
 mvn -pl sluice-api spring-boot:run
 ```
-`sluice-api/src/main/resources/application.yml` points at `localhost:5432` by default for this path.
+
+The default configuration uses PostgreSQL at `localhost:5432` and mock upstream at `localhost:8081`.
+
+## Configuration
+
+The worker and limiter settings are in:
+
+```text
+sluice-api/src/main/resources/application.yml
+```
+
+Current defaults:
+
+```yaml
+sluice:
+  rate-limit:
+    capacity: 10
+    refill-per-second: 5.0
+  worker:
+    count: 2
+    lease-seconds: 30
+    max-attempts: 5
+  mock-upstream:
+    url: http://localhost:8081/simulate
+```
+
+| Property | Default | Meaning |
+|---|---:|---|
+| `sluice.rate-limit.capacity` | `10` | Maximum accumulated tokens and initial burst allowance |
+| `sluice.rate-limit.refill-per-second` | `5.0` | Tokens replenished per second |
+| `sluice.worker.count` | `2` | Background worker threads started by the application |
+| `sluice.worker.lease-seconds` | `30` | Initial lease duration for a claimed job |
+| `sluice.worker.max-attempts` | `5` | Failed-attempt budget before dead-lettering |
+| `sluice.mock-upstream.url` | `http://localhost:8081/simulate` | Upstream endpoint used by the handler |
+
+Capacity must be at least one. The refill rate must be positive and finite. Invalid limiter settings fail during worker startup.
+
+A fractional refill rate is supported. For example, `0.5` replenishes one token every two seconds.
+
+The default bucket begins with 10 tokens and replenishes five per second. It allows controlled bursts; it does not enforce a strict fixed-window limit of five calls in every calendar second.
+
+Docker Compose overrides the database and upstream addresses to use container networking. Rebuild the application image after changing source-controlled configuration when using the full Compose setup.
 
 ## Running the tests
+
+Latest local result after integrating the Token Bucket feature:
+
+```text
+[INFO] Tests run: 33, Failures: 0, Errors: 0, Skipped: 0
+```
+
+Run the core suite:
 
 ```bash
 mvn -pl sluice-core test
 ```
 
-Requires a running Docker daemon — most tests spin up a disposable Postgres container via Testcontainers per run. The pure-logic test classes (`BackoffCalculatorTest`, `CronScheduleCalculatorTest`) don't touch Docker at all and run in milliseconds.
+Run the full Maven reactor's tests:
 
-The same suite runs automatically on every push via [GitHub Actions](.github/workflows/ci.yml) — no Docker Desktop to remember to start; GitHub's runners have Docker available by default. One test, `WorkerTest.processOnceUsesRetryAfterOnRateLimit`, depends on a real `mock-upstream` instance being reachable over HTTP: locally, where it usually is, the test genuinely verifies the `Retry-After` behavior end-to-end; on a bare CI runner where nothing but Postgres is provisioned, it skips cleanly via `Assumptions.assumeTrue(...)` rather than failing — a missing optional dependency and a real regression are different situations and are reported differently on purpose.
+```bash
+mvn test
+```
+
+The PostgreSQL integration tests require a running Docker daemon because they use Testcontainers.
+
+### Pure logic tests
+
+`BackoffCalculatorTest`, `CronScheduleCalculatorTest`, and `TokenBucketTest` do not require Docker.
+
+Run the bucket tests independently:
+
+```bash
+mvn -pl sluice-core -Dtest=TokenBucketTest test
+```
+
+`TokenBucketTest` verifies:
+
+- Initial burst admission up to capacity.
+- Rejection when empty.
+- Local-throttle identification and upward rounding of retry delays.
+- Fractional refill after elapsed time.
+- Capacity enforcement after a long idle period.
+- Rejection of invalid configuration.
+
+A controllable clock makes refill tests deterministic without sleeping.
+
+### Worker integration tests
+
+Run:
+
+```bash
+mvn -pl sluice-core -Dtest=WorkerTest test
+```
+
+The worker tests retain the existing empty-queue, successful-processing, and missing-handler coverage.
+
+Rate-limit integration coverage includes:
+
+| Test | What it verifies |
+|---|---|
+| `processOnceUsesRetryAfterOnRateLimit` | An actual HTTP 429 with `Retry-After: 7` schedules the job using seven seconds and increments its failed-attempt count |
+| `missingRetryAfterStillDefaultsToOneSecond` | A 429 without the header retains the existing one-second fallback |
+| `concurrentWorkersShareBucketAndDeferWithoutSpendingAttempts` | Eight workers share a three-token bucket; three jobs complete and five are deferred without spending attempts |
+| `localDeferralRequiresCurrentClaimOwner` | Another worker cannot defer an owned claim, and an already-deferred job cannot be deferred again through that claim |
+
+The concurrency test uses `maxAttempts = 1`, so accidentally treating local throttling as a failed attempt would immediately expose the error through dead-lettering.
+
+The HTTP regression tests create their own local HTTP server and exercise the real `SimulatedApiCallHandler`. They no longer depend on a separately running mock-upstream application or skip when that application is absent.
+
+The GitHub Actions workflow runs the test suite on pushes.
 
 ## Benchmark results
 
-100 jobs enqueued per phase, each carrying a simulated 50ms upstream latency, processed against a real running `mock-upstream` instance (not an in-process stub), with worker count scaled 1 → 2 → 4 → 8. `sluice-api`'s own background workers were stopped for the duration of the run, so each phase's worker count is exactly what it claims to be.
+**These results are the existing unthrottled worker-scaling baseline.**
+
+`BenchmarkRunner` constructs `SimulatedApiCallHandler` directly. It does not use the token-bucket wrapper created by `WorkerStartup`, so the table below does not measure the application's new default five-token-per-second configuration.
+
+To benchmark rate-limited execution, the benchmark must use the same shared-bucket wrapper and record the capacity and refill rate used. No new limiter-enabled benchmark results are claimed here.
+
+The baseline enqueued 100 jobs per phase, each with 50 ms of simulated upstream latency, against a real running mock-upstream instance. Worker count increased from one to eight.
+
+The API application's own workers were stopped during the benchmark so they did not compete with the benchmark workers.
 
 | Workers | Throughput (jobs/sec) | p95 latency (ms) |
-|---|---|---|
+|---|---:|---:|
 | 1 | 9.23 | 10,203 |
 | 2 | 18.14 | 4,834 |
 | 4 | 32.49 | 2,610 |
@@ -402,33 +725,49 @@ The same suite runs automatically on every push via [GitHub Actions](.github/wor
 
 ![Benchmark results: throughput increasing and p95 latency decreasing as worker count scales from 1 to 8](sluice-benchmark-results.png)
 
-Throughput scales substantially with worker count — roughly **4.9×** going from 1 to 8 workers — and p95 latency drops correspondingly, from over 10 seconds down to under 2. Scaling isn't perfectly linear past 4 workers, which is expected and worth stating plainly rather than hiding: every worker still contends for the same single Postgres instance and the same single `mock-upstream` instance, and the benchmark harness itself opens an unpooled JDBC connection per call rather than using a connection pool — both are real, identifiable ceilings on how far throughput can climb before something else becomes the bottleneck.
+Throughput increased approximately 4.9 times from one to eight workers, while p95 latency fell from over 10 seconds to under two seconds.
 
-Produced by `sluice-core/src/test/java/dev/sluice/core/BenchmarkRunner.java`, run manually against a `docker compose up -d` Postgres and `mock-upstream`.
+Scaling was not linear. Workers shared one PostgreSQL instance and one mock-upstream instance, and the benchmark harness used unpooled JDBC connections. These constraints affect the observed scaling.
+
+Benchmark source:
+
+```text
+sluice-core/src/test/java/dev/sluice/core/BenchmarkRunner.java
+```
 
 ## Key design decisions
 
-A few choices worth calling out, since the reasoning is most of the point of this project:
-
-- **`SELECT ... FOR UPDATE SKIP LOCKED` over a plain `FOR UPDATE`.** A blocking lock serializes every claim across workers; `SKIP LOCKED` lets workers proceed genuinely in parallel by skipping rows another transaction already holds.
-- **Leases + heartbeats, not "trust the worker to call back."** A dead process can't run cleanup code. A lease turns "is this worker still alive?" into a simple, checkable deadline instead of an unanswerable question.
-- **At-least-once delivery + idempotency keys, not a doomed attempt at exactly-once.** Exactly-once delivery across independently-failing processes is a known-unsolvable problem in distributed systems. The realistic target — used by every serious queue system — is guaranteeing a job *will* run, and making it safe if it runs more than once.
-- **`BIGINT GENERATED ALWAYS AS IDENTITY`, not `UUID`, for primary keys.** Sequential ids insert at the right edge of the B-tree index; random UUIDs scatter across it, causing page splits that degrade insert throughput under load — a real cost given this project's own benchmark goals.
-- **`status TEXT` + `CHECK`, not a Postgres `ENUM`.** Adding a new status value (`dead_letter`) is a plain `ALTER TABLE ... DROP/ADD CONSTRAINT` — no enum-type migration ceremony, and no extra JDBC type-mapping code to maintain.
-- **`ON CONFLICT (idempotency_key) DO NOTHING`, not check-then-insert.** Checking existence and inserting as two separate steps is a race condition under concurrency — the exact class of bug `SKIP LOCKED` exists to prevent elsewhere. The conflict has to be resolved atomically, inside one statement.
-- **A `job_schedules` table decoupled from individual job executions**, not one job re-enqueuing the next occurrence of itself. Self-chaining means a single failed link silently ends the schedule forever. A separate table with its own `next_run_at` survives any individual execution's failure.
-- **A `Worker.processOnce()` / `run()` split, not one big infinite-loop method.** `processOnce()` does exactly one claim-and-handle cycle and returns a boolean — directly unit-testable, no test can cleanly assert against an infinite loop. `run()` is a thin, effectively untested wrapper that just calls it repeatedly.
-- **`RateLimitedException` as its own type, not a generic catch-all.** A rate-limited failure carries real information — how long the upstream itself wants you to wait — that shouldn't be discarded in favor of a locally-computed guess. A specific exception type, caught before the general handler, is what lets that real signal actually reach `markFailed`.
-- **Multi-stage Dockerfiles, building from source.** A `maven` build stage compiles the full reactor; only the finished jar is copied into a slim `eclipse-temurin` JRE runtime image — the shipped image never carries Maven, the JDK, or source code.
-- **Micrometer lives in `sluice-core`, not `sluice-api`.** Same reasoning as Jackson: it's a framework-agnostic facade, not a Spring library, so `Worker` can record metrics without violating core's zero-Spring rule. `sluice-api` only supplies the concrete, auto-configured registry Spring Boot builds.
-- **A skipped test, not a failing one, when an optional dependency is unavailable.** `WorkerTest`'s rate-limit test needs a real `mock-upstream` reachable over HTTP — genuinely absent on a bare CI runner, not a bug. `Assumptions.assumeTrue(...)` turns that into an honest "couldn't verify here" rather than a false red X.
+- **Atomic claiming with `SKIP LOCKED`.** Workers skip rows locked by another claimant and can select other eligible jobs.
+- **Leases and explicit recovery primitives.** A deadline makes abandoned claims detectable even when a worker cannot run cleanup code.
+- **At-least-once recovery semantics.** Recovered jobs may execute again. Enqueue deduplication and handler-side idempotency address different parts of that problem.
+- **Sequential identity primary keys.** Database-generated numeric IDs fit the queue's append-heavy workload.
+- **`TEXT` status with a `CHECK` constraint.** Allowed states are controlled through schema migrations without introducing a PostgreSQL enum mapping.
+- **Database-enforced enqueue idempotency.** `ON CONFLICT (idempotency_key) DO NOTHING` handles competing submissions atomically.
+- **Recurring schedules separate from executions.** An individual job failure does not end future occurrences of its schedule.
+- **`processOnce()` separate from `run()`.** A single processing cycle can be tested directly while the production loop handles repeated polling.
+- **One shared Token Bucket per application instance.** Creating the bucket before the worker loop gives every wrapped worker the same allowance.
+- **Monotonic, lazy refill.** `System.nanoTime()` supplies elapsed time, and acquisition calculates refill without a timer thread.
+- **A small synchronized accounting section.** Refill and consumption are atomic; HTTP execution occurs outside the bucket lock.
+- **Local deferral separate from actual failure.** Token scarcity does not consume attempts or send an otherwise healthy job to the dead-letter queue.
+- **Reuse of `RateLimitedException`.** The existing upstream constructor remains valid, while a local-throttle flag selects the new deferral path.
+- **Existing PostgreSQL scheduling for denied admissions.** A future `available_at` releases the worker to process other work.
+- **Self-contained HTTP regression tests.** A local HTTP server verifies 429 handling without depending on a separately started service.
+- **Framework-independent metrics in core.** Micrometer instrumentation stays with the worker; Spring supplies the runtime registry.
+- **Multi-stage Docker builds.** Maven builds the application, and the runtime image contains the packaged application and JRE.
 
 ## Project status / roadmap
 
-- [x] **Week 1** — Schema + Flyway, enqueue endpoint, `SKIP LOCKED` claiming, concurrency-tested.
-- [x] **Week 2** — Leases, heartbeats, reaper, backoff + jitter, dead letter queue.
-- [x] **Week 3 (core logic)** — Idempotency keys, job priorities, `job_schedules` + real cron-based next-run computation, all tested.
-- [ ] **Week 3 (remaining)** — Wire the reaper (`reclaimExpiredLeases`) and `findDueSchedules`/`fireSchedule` to actual recurring timers inside `sluice-api`. Both are fully built and tested, but only ever invoked manually or in tests today.
-- [x] **Week 4** — `Worker`/`JobHandler` processing loop, a real rate-limit-aware handler (`SimulatedApiCallHandler` + `RateLimitedException`), a standalone `mock-upstream` service, workers wired to start automatically in `sluice-api`, the full stack running via Docker Compose (multi-stage builds), and a benchmark measuring real throughput/p95 latency across 1→8 workers — see [results](#benchmark-results).
-- [x] **Week 5** — `Worker` instrumented with Micrometer counters and a timer, exposed via Spring Boot Actuator, scraped by Prometheus, and visualized live in a real Grafana dashboard. GitHub Actions CI running the full test suite — including Testcontainers-backed Postgres tests — on every push.
-- [ ] **Deferred by choice** — Port the concurrency, retry, and idempotency patterns learned building Sluice back into the author's other LLM/RAG projects.
+- [x] **Week 1:** Schema, Flyway migrations, enqueue endpoint, concurrent claiming, and concurrency tests.
+- [x] **Week 2 — repository primitives:** Leases, heartbeat updates, expired-lease reclamation, backoff, jitter, and dead-letter handling.
+- [x] **Week 3 — core logic:** Enqueue idempotency, priority-aware claiming, recurring schedule repositories, and cron calculation.
+- [ ] **Recovery integration:** Invoke `reclaimExpiredLeases` on a recurring timer and add periodic heartbeats for active long-running jobs.
+- [ ] **Recurring schedule integration:** Invoke `findDueSchedules` and `fireSchedule` automatically from the running application.
+- [x] **Week 4:** Autonomous workers, the HTTP upstream handler, reactive 429 handling, mock upstream, Docker Compose, and the baseline worker-scaling benchmark.
+- [x] **Week 5:** Micrometer instrumentation, Actuator metrics, Prometheus, Grafana, and GitHub Actions testing.
+- [x] **Proactive rate limiting:** One configurable in-memory Token Bucket shared by the current application's `call-api` workers.
+- [x] **Attempt-preserving deferral:** Locally throttled jobs return to pending without consuming their failure budget.
+- [x] **Rate-limit regression coverage:** Deterministic bucket tests, concurrent worker integration, claim ownership checks, and self-contained HTTP 429 tests.
+- [x] **Latest local suite:** 33 tests passed with no failures, errors, or skipped tests.
+- [ ] **Future benchmark:** Measure worker behavior with the shared limiter enabled and report its capacity and refill configuration.
+- [ ] **Future multi-instance support:** Coordinate outbound rate limits across JVMs if the deployment expands beyond the current application instance.
+- [ ] **Deferred application work:** Apply the queue, retry, and idempotency patterns to other LLM/RAG projects.

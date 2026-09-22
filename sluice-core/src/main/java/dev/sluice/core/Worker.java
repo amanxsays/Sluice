@@ -47,12 +47,25 @@ public class Worker {
                 sample.stop(meterRegistry.timer("sluice.worker.job.duration"));
             }
         } catch (RateLimitedException e) {
-            jobsRepository.markFailed(job.id(), workerId, e.retryAfterSeconds(), maxAttempts);
-            meterRegistry.counter("sluice.worker.jobs", "outcome", "failed").increment();
+            if (e.isLocalThrottle()) {
+                if (jobsRepository.deferRateLimited(
+                        job.id(), workerId, e.retryAfterSeconds())) {
+                    meterRegistry.counter(
+                            "sluice.worker.jobs", "outcome", "deferred").increment();
+                }
+            } else {
+                jobsRepository.markFailed(
+                        job.id(), workerId, e.retryAfterSeconds(), maxAttempts);
+                meterRegistry.counter(
+                        "sluice.worker.jobs", "outcome", "failed").increment();
+            }
         } catch (Exception e) {
-            int backoffSeconds = backoffCalculator.nextDelaySeconds(job.attempts());
-            jobsRepository.markFailed(job.id(), workerId, backoffSeconds, maxAttempts);
-            meterRegistry.counter("sluice.worker.jobs", "outcome", "failed").increment();
+            int backoffSeconds =
+                    backoffCalculator.nextDelaySeconds(job.attempts());
+            jobsRepository.markFailed(
+                    job.id(), workerId, backoffSeconds, maxAttempts);
+            meterRegistry.counter(
+                    "sluice.worker.jobs", "outcome", "failed").increment();
         }
         return true;
     }

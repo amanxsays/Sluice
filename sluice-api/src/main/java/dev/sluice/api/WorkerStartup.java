@@ -13,6 +13,8 @@ import dev.sluice.core.SimulatedApiCallHandler;
 import dev.sluice.core.Worker;
 import io.micrometer.core.instrument.MeterRegistry;
 
+import dev.sluice.core.TokenBucket;
+
 @Component 
 public class WorkerStartup implements CommandLineRunner{
     @Value("${sluice.worker.count}")
@@ -27,6 +29,12 @@ public class WorkerStartup implements CommandLineRunner{
     @Value("${sluice.mock-upstream.url}")
     private String mockUpstreamUrl;
 
+    @Value("${sluice.rate-limit.capacity}")
+    private int bucketCapacity;
+
+    @Value("${sluice.rate-limit.refill-per-second}")
+    private double refillPerSecond;
+
     final JobsRepository repository;
     final MeterRegistry meterRegistry;
 
@@ -37,7 +45,15 @@ public class WorkerStartup implements CommandLineRunner{
 
     @Override
     public void run(String... args) {
-        Map<String, JobHandler> handlers = Map.of("call-api", new SimulatedApiCallHandler(mockUpstreamUrl));
+        TokenBucket bucket = new TokenBucket(bucketCapacity, refillPerSecond);
+        JobHandler upstreamHandler = new SimulatedApiCallHandler(mockUpstreamUrl);
+
+        JobHandler limitedHandler = job -> {
+            bucket.acquireOrThrow();//here actual rate limiting is present
+            upstreamHandler.handle(job);
+        };
+
+        Map<String, JobHandler> handlers = Map.of("call-api", limitedHandler);
         for (int i = 0; i < workerCount; i++) {
             String workerId = "worker-" + i;
             Worker worker = new Worker(repository, handlers, workerId, leaseSeconds, new BackoffCalculator(1, 60), maxAttempts, meterRegistry);

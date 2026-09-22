@@ -149,6 +149,34 @@ public class JobsRepository {
         }
     }
 
+    public boolean deferRateLimited(long jobId, String workerId, int delaySeconds) {
+        if (delaySeconds < 1) {
+            throw new IllegalArgumentException("Delay must be at least one second");
+        }
+
+        String sqlCommand = """
+                UPDATE jobs
+                SET status = 'pending',
+                    available_at = now() + make_interval(secs => ?),
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = now()
+                WHERE id = ? AND claimed_by = ? AND status = 'claimed'
+                """;
+
+        try (Connection conn = dataSource.getConnection();
+            PreparedStatement ps = conn.prepareStatement(sqlCommand)) {
+            ps.setInt(1, delaySeconds);
+            ps.setLong(2, jobId);
+            ps.setString(3, workerId);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw new JobPersistenceException(
+                    "Unable to defer rate-limited job " + jobId, e);
+        }
+    }
+
     public boolean markFailed(long jobId, String workerId, int backoffSeconds, int maxAttempts){
         String sqlCommand = """
                 UPDATE jobs
