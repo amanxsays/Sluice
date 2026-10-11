@@ -11,11 +11,17 @@ public class SimulatedApiCallHandler implements JobHandler {
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
+    private final java.time.Duration requestTimeout;
 
     public SimulatedApiCallHandler(String baseUrl) {
+        this(baseUrl, null);
+    }
+
+    public SimulatedApiCallHandler(String baseUrl, java.time.Duration requestTimeout) {
         this.httpClient = HttpClient.newHttpClient();
         this.objectMapper = new ObjectMapper();
         this.baseUrl = baseUrl;
+        this.requestTimeout = requestTimeout;
     }
 
     private record SimulationConfig(int latencyMs, boolean shouldFail, int retryAfterSeconds) {}
@@ -27,10 +33,11 @@ public class SimulatedApiCallHandler implements JobHandler {
                 + "&shouldFail=" + config.shouldFail()
                 + "&retryAfterSeconds=" + config.retryAfterSeconds();
 
-        HttpRequest request = HttpRequest.newBuilder()
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .POST(HttpRequest.BodyPublishers.noBody())
-                .build();
+                .POST(HttpRequest.BodyPublishers.noBody());
+        if (requestTimeout != null) builder.timeout(requestTimeout);
+        HttpRequest request = builder.build();
         
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() == 200) {

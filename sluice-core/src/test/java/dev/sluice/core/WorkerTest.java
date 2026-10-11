@@ -28,6 +28,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import org.junit.jupiter.api.Timeout;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
@@ -243,5 +248,55 @@ public class WorkerTest {
         assertFalse(repository.deferRateLimited(job.id(), "worker-B", 1));
         assertTrue(repository.deferRateLimited(job.id(), "worker-A", 1));
         assertFalse(repository.deferRateLimited(job.id(), "worker-A", 1));
+    }
+
+    @Test
+    @Timeout(15)
+    void heartbeatProtectsLongRunningJobFromReaper() throws Exception {
+        Job job = repository.enqueue("slow-job", "{}", null, 0);
+
+        JobHandler slowHandler = ignored -> {
+            try {
+                Thread.sleep(4500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Handler interrupted", e);
+            }
+        };
+
+        try (
+            Worker worker = new Worker(
+                    repository,
+                    Map.of("slow-job", slowHandler),
+                    "heartbeat-test-worker",
+                    2,
+                    new BackoffCalculator(1, 60),
+                    5,
+                    new SimpleMeterRegistry()
+            );
+
+            ExecutorService executor =
+                    Executors.newSingleThreadExecutor()
+        ) {
+            Future<Boolean> processing =
+                    executor.submit(worker::processOnce);
+
+            while (!processing.isDone()) {
+                assertEquals(
+                        0,
+                        repository.reclaimExpiredLeases(5),
+                        "A healthy running job must not be reclaimed"
+                );
+
+                Thread.sleep(100);
+            }
+
+            assertTrue(processing.get());
+
+            Job finished = repository.findById(job.id()).orElseThrow();
+
+            assertEquals("completed", finished.status());
+            assertEquals(0, finished.attempts());
+        }
     }
 }

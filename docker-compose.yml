@@ -30,12 +30,9 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/postgres
       SPRING_DATASOURCE_USERNAME: postgres
       SPRING_DATASOURCE_PASSWORD: postgres
-      SLUICE_MOCK_UPSTREAM_URL: http://mock-upstream:8081/simulate
     depends_on:
       postgres:
         condition: service_healthy
-      mock-upstream:
-        condition: service_started
 
   prometheus:
     image: prom/prometheus:latest

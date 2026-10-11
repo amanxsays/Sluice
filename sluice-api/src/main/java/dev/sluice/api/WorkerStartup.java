@@ -1,6 +1,11 @@
 package dev.sluice.api;
 
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+
+import jakarta.annotation.PreDestroy;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
@@ -37,6 +42,10 @@ public class WorkerStartup implements CommandLineRunner{
 
     final JobsRepository repository;
     final MeterRegistry meterRegistry;
+    private final String instanceId = UUID.randomUUID().toString();
+
+    private final List<Worker> workers = new ArrayList<>();
+    private final List<Thread> workerThreads = new ArrayList<>();
 
     public WorkerStartup(JobsRepository repository, MeterRegistry meterRegistry){
         this.repository = repository;
@@ -55,11 +64,30 @@ public class WorkerStartup implements CommandLineRunner{
 
         Map<String, JobHandler> handlers = Map.of("call-api", limitedHandler);
         for (int i = 0; i < workerCount; i++) {
-            String workerId = "worker-" + i;
-            Worker worker = new Worker(repository, handlers, workerId, leaseSeconds, new BackoffCalculator(1, 60), maxAttempts, meterRegistry);
-            Thread thread = new Thread(worker::run);
+            String workerId = instanceId + "-worker-" + i;
+
+            Worker worker = new Worker(
+                    repository,
+                    handlers,
+                    workerId,
+                    leaseSeconds,
+                    new BackoffCalculator(1, 60),
+                    maxAttempts,
+                    meterRegistry
+            );
+
+            workers.add(worker);
+
+            Thread thread = new Thread(worker::run, workerId);
             thread.setDaemon(true);
+
+            workerThreads.add(thread);
             thread.start();
         }
+    }
+    @PreDestroy
+    public void stopWorkers() {
+        workers.forEach(Worker::stop);
+        workerThreads.forEach(Thread::interrupt);
     }
 }

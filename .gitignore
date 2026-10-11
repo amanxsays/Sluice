@@ -1,0 +1,16 @@
+# Java build output
+**/target/
+
+# Frontend dependencies and generated output
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+frontend/test-results/
+frontend/playwright-report/
+
+# Deployment secrets (commit only the example templates)
+**/.env
+**/.env.*
+!**/.env.example

@@ -1,0 +1,28 @@
+# Optional Render Blueprint. Manual dashboard settings are documented in DEPLOYMENT.md.
+services:
+  - type: web
+    name: sluice-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./sluice-api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
+      - key: SLUICE_CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: DB_POOL_SIZE
+        value: "5"
+      - key: SLUICE_WORKER_COUNT
+        value: "2"
+      - key: SLUICE_LAB_ENABLED
+        value: "true"
+      - key: SLUICE_SIMULATION_ENABLED
+        value: "true"
+      - key: JAVA_TOOL_OPTIONS
+        value: "-XX:MaxRAMPercentage=65.0"

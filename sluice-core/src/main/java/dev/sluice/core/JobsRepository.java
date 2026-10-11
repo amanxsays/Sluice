@@ -9,6 +9,9 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 public class JobsRepository {
     private final DataSource dataSource;
@@ -18,22 +21,53 @@ public class JobsRepository {
     }
 
     public Job enqueue(String jobType,String payloadJson,String idempotencyKey,int priority){
+        try (Connection conn = dataSource.getConnection()) {
+            return enqueue(conn, jobType, payloadJson, idempotencyKey, priority);
+        } catch (SQLException e) {
+            throw new JobPersistenceException("Failed to enqueue job of type " + jobType, e);
+        }
+    }
+
+    private Job enqueue(Connection conn, String jobType, String payloadJson, String idempotencyKey, int priority) throws SQLException {
         String sqlCommand="INSERT INTO jobs (job_type, payload, idempotency_key, priority) VALUES (?, ?::jsonb, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING RETURNING *";
-        try (Connection conn = dataSource.getConnection();
-            PreparedStatement ps = conn.prepareStatement(sqlCommand)){
+        try (PreparedStatement ps = conn.prepareStatement(sqlCommand)){
                 ps.setString(1, jobType);
                 ps.setString(2, payloadJson);
                 ps.setString(3, idempotencyKey);
                 ps.setInt(4, priority);
             try (ResultSet rs=ps.executeQuery()){
                 if(!rs.next()){
-                    return findByIdempotencyKey(idempotencyKey).orElseThrow();
+                    // Reuse this connection: concurrent duplicate submissions must not exhaust the pool.
+                    try (PreparedStatement existing = conn.prepareStatement("SELECT * FROM jobs WHERE idempotency_key = ?")) {
+                        existing.setString(1, idempotencyKey);
+                        try (ResultSet found = existing.executeQuery()) {
+                            if (!found.next()) throw new SQLException("Idempotent job missing");
+                            return mapRow(found);
+                        }
+                    }
                 }
                 return mapRow(rs);
             }
         }
-        catch (SQLException e){
-            throw new JobPersistenceException("Failed to enqueue job of type "+jobType, e);
+    }
+
+    /** Atomic batch; a supplied key prefix makes resubmitting the same batch idempotent. */
+    public List<Job> enqueueBatch(String jobType, String payload, String keyPrefix, int priority, int count) {
+        if (count < 1 || count > 100) throw new IllegalArgumentException("Batch size must be 1–100");
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                List<Job> jobs = new ArrayList<>();
+                for (int i = 0; i < count; i++) jobs.add(enqueue(conn, jobType, payload,
+                        keyPrefix == null ? null : keyPrefix + ":" + (i + 1), priority));
+                conn.commit();
+                return jobs;
+            } catch (SQLException | RuntimeException e) {
+                conn.rollback();
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw new JobPersistenceException("Failed to enqueue batch", e);
         }
     }
     private Job mapRow(ResultSet rs) throws SQLException{
@@ -59,10 +93,23 @@ public class JobsRepository {
     }
 
     public Optional<Job> claim(String workerId,int leaseSeconds){
+        return claimMatching(workerId, leaseSeconds, null);
+    }
+
+    /** Dedicated lab workers claim only their own run; ordinary workers skip lab jobs. */
+    public Optional<Job> claimForJobType(String workerId, int leaseSeconds, String jobType) {
+        if (jobType == null || !jobType.startsWith("sluice-lab:")) {
+            throw new IllegalArgumentException("A reserved lab job type is required");
+        }
+        return claimMatching(workerId, leaseSeconds, jobType);
+    }
+
+    private Optional<Job> claimMatching(String workerId, int leaseSeconds, String jobType) {
         String sqlCommand="""
             WITH next_job AS (
                 SELECT id FROM jobs
                 WHERE status = 'pending' AND (available_at IS NULL OR available_at <= now())
+                    AND %s
                 ORDER BY priority DESC, created_at
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
@@ -71,12 +118,16 @@ public class JobsRepository {
             SET status = 'claimed', claimed_by = ?, claimed_at = now(), updated_at = now(),  lease_expires_at = now() + make_interval(secs => ?)
             WHERE id IN (SELECT id FROM next_job)
             RETURNING *
-            """;
+            """.formatted(jobType == null
+                    ? "job_type NOT LIKE 'sluice-lab:%'"
+                    : "job_type = ?");
 
         try (Connection conn = dataSource.getConnection();
             PreparedStatement ps = conn.prepareStatement(sqlCommand)){
-            ps.setString(1, workerId);
-            ps.setInt(2, leaseSeconds);
+            int parameter = 1;
+            if (jobType != null) ps.setString(parameter++, jobType);
+            ps.setString(parameter++, workerId);
+            ps.setInt(parameter, leaseSeconds);
 
             try(ResultSet rs = ps.executeQuery()){
                 if(!rs.next()){
@@ -86,6 +137,20 @@ public class JobsRepository {
             }
         } catch (SQLException e ){
             throw new JobPersistenceException("Faild to claim job for worker "+workerId, e);
+        }
+    }
+
+    public List<Job> findByJobType(String jobType) {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT * FROM jobs WHERE job_type = ? ORDER BY id")) {
+            ps.setString(1, jobType);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<Job> jobs = new ArrayList<>();
+                while (rs.next()) jobs.add(mapRow(rs));
+                return jobs;
+            }
+        } catch (SQLException e) {
+            throw new JobPersistenceException("Failed to list jobs for type " + jobType, e);
         }
     }
 
@@ -238,6 +303,82 @@ public class JobsRepository {
             return rowsUpdated>0;
         } catch (SQLException e){
             throw new JobPersistenceException("Failed to mark job completed with job " + jobId, e);
+        }
+    }
+
+    public List<Job> findRecent(String status, int limit, int offset) {
+        String sqlCommand = "SELECT * FROM jobs"
+                + (status == null ? "" : " WHERE status = ?")
+                + " ORDER BY id DESC LIMIT ? OFFSET ?";
+
+        try (Connection conn = dataSource.getConnection();
+            PreparedStatement ps = conn.prepareStatement(sqlCommand)) {
+
+            int parameter = 1;
+
+            if (status != null) {
+                ps.setString(parameter++, status);
+            }
+
+            ps.setInt(parameter++, limit);
+            ps.setInt(parameter, offset);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                List<Job> jobs = new ArrayList<>();
+
+                while (rs.next()) {
+                    jobs.add(mapRow(rs));
+                }
+
+                return jobs;
+            }
+
+        } catch (SQLException e) {
+            throw new JobPersistenceException(
+                    "Failed to list jobs", e);
+        }
+    }
+
+    public Map<String, Long> countByStatus() {
+        String sqlCommand = """
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (
+                        WHERE status = 'pending'
+                    ) AS pending,
+                    COUNT(*) FILTER (
+                        WHERE status = 'claimed'
+                    ) AS claimed,
+                    COUNT(*) FILTER (
+                        WHERE status = 'completed'
+                    ) AS completed,
+                    COUNT(*) FILTER (
+                        WHERE status = 'dead_letter'
+                    ) AS dead_letter
+                FROM jobs
+                """;
+
+        try (Connection conn = dataSource.getConnection();
+            PreparedStatement ps = conn.prepareStatement(sqlCommand);
+            ResultSet rs = ps.executeQuery()) {
+
+            if (!rs.next()) {
+                throw new JobPersistenceException(
+                        "Job statistics query returned no row",
+                        new SQLException("Expected one aggregate row"));
+            }
+
+            return Map.of(
+                    "total", rs.getLong("total"),
+                    "pending", rs.getLong("pending"),
+                    "claimed", rs.getLong("claimed"),
+                    "completed", rs.getLong("completed"),
+                    "dead_letter", rs.getLong("dead_letter")
+            );
+
+        } catch (SQLException e) {
+            throw new JobPersistenceException(
+                    "Failed to count jobs by status", e);
         }
     }
 

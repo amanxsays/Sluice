@@ -1,10 +1,22 @@
+server:
+  address: 0.0.0.0
+  port: ${PORT:8080}
+
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/postgres
-    username: postgres
-    password: postgres
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:5}
 
 sluice:
+  cors:
+    allowed-origins: ${SLUICE_CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+  simulation:
+    enabled: ${SLUICE_SIMULATION_ENABLED:true}
+  lab:
+    enabled: true
   rate-limit:
     capacity: 10
     refill-per-second: 5.0
@@ -12,11 +24,18 @@ sluice:
     count: 2
     lease-seconds: 30
     max-attempts: 5
+  scheduler:
+    poll-delay-ms: 2000
+  reaper:
+    poll-delay-ms: 3000
   mock-upstream:
-    url: http://localhost:8081/simulate
+    url: ${SLUICE_MOCK_UPSTREAM_URL:http://127.0.0.1:${server.port}/simulate}
     
 management:
   endpoints:
     web:
       exposure:
-        include: prometheus
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
