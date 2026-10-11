@@ -3,7 +3,7 @@ import { formatDate, formatPayload } from '../lib/format.js';
 import StatusBadge from './StatusBadge.jsx';
 import Icon from './Icon.jsx';
 
-export default function JobDetails({ id, job, error, refreshing, onClose, onRefresh }) {
+export default function JobDetails({ id, job, error, refreshing, connection, onClose, onRefresh }) {
   const dialogRef = useRef(null);
   const closeRef = useRef(null);
   const [copyMessage, setCopyMessage] = useState('');
@@ -58,10 +58,10 @@ export default function JobDetails({ id, job, error, refreshing, onClose, onRefr
   }}>
     <div className="details-header"><div><h2 id="details-title">Job <span className="mono">#{id}</span></h2><p id="details-description">Job details</p></div><button type="button" ref={closeRef} className="icon-button" aria-label="Close job details" onClick={onClose}><Icon name="close" size={20} /></button></div>
     <div className="details-content">
-      {error && <div className="detail-error" role="alert"><Icon name="alert" size={17} /><div><strong>{job ? 'Details could not refresh' : 'Details unavailable'}</strong><p>{error}</p>{job && <p>The last loaded details remain below.</p>}<button type="button" className="text-button" onClick={onRefresh}>Try again</button></div></div>}
-      {!job && !error && <div className="details-loading" role="status"><span className="spinner" />Loading job details…</div>}
+      {error && connection.ready && <div className="detail-error" role="alert"><Icon name="alert" size={17} /><div><strong>{job ? 'Details could not refresh' : 'Details unavailable'}</strong><p>{error}</p>{job && <p>The last loaded details remain below.</p>}<button type="button" className="text-button" onClick={onRefresh}>Try again</button></div></div>}
+      {!job && (!error || !connection.ready) && <div className="details-loading" role="status">{connection.phase === 'unavailable' ? <><span>Connection unavailable.</span><button type="button" className="text-button" onClick={connection.retry}>Try again</button></> : <><span className="spinner" />{connection.ready ? 'Loading job details…' : 'Waiting for connection…'}</>}</div>}
       {job && <>
-        <div className="detail-summary"><StatusBadge status={job.status} /><span className="detail-live"><span className={`status-dot ${refreshing ? 'pulsing' : ''}`} />{error ? 'Last loaded state' : 'Updates every 3s'}</span></div>
+        <div className="detail-summary"><StatusBadge status={job.status} /><span className="detail-live"><span className={`status-dot ${refreshing ? 'pulsing' : ''}`} />{error || !connection.ready ? 'Last loaded state' : 'Updates every 3s'}</span></div>
         <div className="detail-id"><span>Job ID</span><div><code>{job.id}</code><button type="button" className="icon-button" aria-label="Copy job ID" onClick={() => copy(job.id, 'Job ID')}><Icon name="copy" size={15} /></button></div></div>
         <dl className="detail-fields">{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
         <details className="advanced-options worker-details"><summary>Worker & lease details<Icon name="chevron" size={15} /></summary><dl className="detail-fields">{workerFields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></details>

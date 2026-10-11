@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { createPoller } from '../lib/poller.js';
+import { isConnectionFailure } from '../lib/connection.js';
 
-export default function useDashboard({ status, limit, offset, selectedId }) {
+export default function useDashboard({ status, limit, offset, selectedId, enabled, onConnectionLost }) {
   const queryKey = `${status}:${limit}:${offset}`;
   const [snapshot, setSnapshot] = useState({
     jobs: [], stats: null, detail: null, queryKey: null, detailId: null,
@@ -11,6 +12,7 @@ export default function useDashboard({ status, limit, offset, selectedId }) {
   const poller = useRef(null);
 
   useEffect(() => {
+    if (!enabled) return;
     const instance = createPoller(async (signal) => {
       if (signal.aborted) return;
       setSnapshot((previous) => ({ ...previous, refreshing: true }));
@@ -30,21 +32,25 @@ export default function useDashboard({ status, limit, offset, selectedId }) {
             next[section] = result.value;
             if (section === 'jobs') next.queryKey = queryKey;
             if (section === 'detail') next.detailId = selectedId;
-          } else {
+          } else if (section === 'detail' || !isConnectionFailure(result.reason)) {
             next.errors[section] = result.reason.message;
           }
         });
         if (results.every((result) => result.status === 'fulfilled')) next.lastRefresh = Date.now();
         return next;
       });
+      const failure = results.find((result, index) => calls[index][0] !== 'detail'
+        && result.status === 'rejected' && isConnectionFailure(result.reason));
+      if (failure) onConnectionLost(failure.reason);
     });
     poller.current = instance;
-    return () => instance.stop();
-  }, [status, limit, offset, selectedId, queryKey]);
+    return () => { instance.stop(); poller.current = null; };
+  }, [status, limit, offset, selectedId, queryKey, enabled, onConnectionLost]);
 
   const refresh = useCallback(() => poller.current?.refresh(), []);
   return {
     ...snapshot,
+    refreshing: enabled && snapshot.refreshing,
     errors: {
       ...snapshot.errors,
       jobs: snapshot.errorQueryKey === queryKey ? snapshot.errors.jobs : undefined,

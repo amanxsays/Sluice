@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { createPoller } from '../lib/poller.js';
+import { isConnectionFailure } from '../lib/connection.js';
 import { defaultsFor, scenarios, validateOptions } from '../lib/scenarios.js';
 import Icon from './Icon.jsx';
 import InfoTip from './InfoTip.jsx';
@@ -10,7 +11,7 @@ function SelectField({ name, label, value, choices, onChange, help }) {
   return <div className="field"><label htmlFor={`test-${name}`}>{label}</label><select id={`test-${name}`} value={value} onChange={(event) => onChange(name, Number(event.target.value))}>{choices.map(([number, text]) => <option value={number} key={number}>{text}</option>)}</select>{help && <p className="field-help">{help}</p>}</div>;
 }
 
-export default function TestLab({ selection, onSelectionChange, onOpenJob, onChanged }) {
+export default function TestLab({ selection, onSelectionChange, onOpenJob, onChanged, ready, onConnectionLost }) {
   const [optionsByTest, setOptionsByTest] = useState({});
   const [run, setRun] = useState(null);
   const [error, setError] = useState('');
@@ -22,7 +23,10 @@ export default function TestLab({ selection, onSelectionChange, onOpenJob, onCha
   const lastResult = useRef(null);
   const changed = useRef(onChanged);
   useEffect(() => { changed.current = onChanged; }, [onChanged]);
+  useEffect(() => () => request.current?.abort(), []);
   useEffect(() => {
+    setConnected(false);
+    if (!ready) return;
     const poller = createPoller(async (signal) => {
       const current = await api.currentTest({ signal });
       if (signal.aborted) return;
@@ -35,11 +39,12 @@ export default function TestLab({ selection, onSelectionChange, onOpenJob, onCha
       }
     }, { intervalMs: 600, onError: (failure) => {
       setConnected(false);
+      if (isConnectionFailure(failure)) onConnectionLost(failure);
       setError(failure.status === 404 ? 'Test lab is unavailable. Rebuild the API and check sluice.lab.enabled. (HTTP 404)' : failure.message);
     } });
     poll.current = poller;
-    return () => { poller.stop(); request.current?.abort(); };
-  }, []);
+    return () => { poller.stop(); poll.current = null; };
+  }, [ready, onConnectionLost]);
 
   const scenario = scenarios.find((item) => item.id === selection);
   const options = optionsByTest[selection] || defaultsFor(selection);
@@ -50,7 +55,7 @@ export default function TestLab({ selection, onSelectionChange, onOpenJob, onCha
 
   async function start(event) {
     event.preventDefault();
-    if (request.current || active || validation) return;
+    if (request.current || active || validation || !ready || !connected) return;
     const controller = new AbortController();
     request.current = controller;
     setPending(true);
@@ -87,9 +92,9 @@ export default function TestLab({ selection, onSelectionChange, onOpenJob, onCha
           {selection === 'rate-limit' && <p className="scenario-fixed-setting"><Icon name="clock" size={14} />Token bucket: capacity 1, refill 1 / second.</p>}
         </fieldset>
         {validation && <p className="form-error" role="alert">{validation}</p>}
-        {error && <p className="form-error" role="alert">{error}</p>}
+        {error && ready && <p className="form-error" role="alert">{error}</p>}
         {submissionError && <p className="form-error" role="alert">{submissionError}</p>}
-        <button className="button button-primary submit-button" type="submit" disabled={pending || active || Boolean(validation) || !connected}>{pending ? <><span className="spinner" />Starting test…</> : active ? <><span className="spinner" />Test running</> : <>Run {scenario.short.toLowerCase()}<Icon name="arrow" size={17} /></>}</button>
+        <button className="button button-primary submit-button" type="submit" disabled={pending || active || Boolean(validation) || !connected || !ready}>{pending ? <><span className="spinner" />Starting test…</> : !ready ? 'Waiting for connection' : active ? <><span className="spinner" />Test running</> : <>Run {scenario.short.toLowerCase()}<Icon name="arrow" size={17} /></>}</button>
         <div className="lab-scope-note"><span>One active test at a time.</span><InfoTip label="Test reports">Test jobs remain in the queue. Reports reset when the backend restarts.</InfoTip></div>
       </form></section>
       <section className="card lab-visuals" aria-label="Test visualization"><div className="card-heading"><h3>{run ? shownScenario.short : 'Live preview'}</h3><span className={`lab-run-badge run-${run?.status || 'idle'}`} aria-live="polite"><span className="status-dot" />{run?.status || 'Ready'}</span></div>

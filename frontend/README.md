@@ -4,6 +4,8 @@ React and Vite, ordinary CSS, and the Sluice REST API. The dashboard and interac
 
 The interface uses a dark theme throughout. **Queue** shows clickable status cards, a compact jobs table, and a preset-based submission form. Custom JSON and idempotency are under **Advanced options**. **Tests** opens a separate view with scenario inputs and live animations; event logs and verification checks expand on demand. Both views preserve form input while navigating and polling. The inspector keeps worker and lease metadata in an expandable section.
 
+When the backend is waking up, the dashboard shows shimmer placeholders and one **Connecting to Sluice** notice. Readiness checks use `GET /jobs/stats`, with a five-second pause after each failed request; ordinary dashboard and lab polling wait until the backend responds. Inputs remain editable, while **Enqueue** and **Run** stay disabled. The interface loads immediately on success. After three minutes, retries stop and **Try again** starts a fresh connection attempt. Reconnection preserves loaded data and form values. Job and test submissions are never replayed automatically; check the queue or current run before repeating a timed-out submission.
+
 Current frontend version: `0.1.0`. The companion Java backend is `0.1.0-SNAPSHOT`. See the root [README](../README.md) for the queue architecture, HTTP API, and project roadmap.
 
 ## Run locally
@@ -62,13 +64,14 @@ The backend now embeds the demo upstream, so hosted deployments do not need a se
 ## Implementation
 
 - `src/lib/api.js`: configurable API client, payload serialization, HTTP errors, request timeout, and cancellation.
+- `src/lib/connection.js` and `src/hooks/useConnection.js`: shared readiness state, serialized startup retries, a three-minute deadline, cancellation, and manual recovery.
 - `src/lib/poller.js` and `src/hooks/useDashboard.js`: serialized polling; manual refreshes coalesce; old queries are cancelled and stale responses ignored. Each successful section retains its data during failures. The displayed refresh time advances only when all visible requests succeed.
 - `src/components/`: submission form, filterable job table, status badges, icons, and a native dialog inspector with keyboard focus management.
 - `src/components/TestLab.jsx`, `TestVisualization.jsx`, and `InfoTip.jsx`: changing scenario forms, keyboard-accessible tooltips, live animations, worker ownership, event log, and measured results. Lab polling is serialized at 600 ms; dashboard polling remains three seconds.
 - `src/lib/scenarios.js`: scenario explanations, defaults, and input constraints.
 - `src/styles.css`: dark theme tokens, responsive layout, compact table, expandable settings, focus states, and reduced-motion support. Fonts use Google Fonts with local system fallbacks.
 - `src/lab.css`: scenario visuals, responsive lab/sidebar controls, and reduced-motion support.
-- `tests/`: Node's built-in test runner verifies API contracts, errors, payload handling, and polling concurrency without needing Docker.
+- `tests/`: 25 tests using Node's built-in runner verify API contracts, errors, payload handling, polling concurrency, and connection startup/recovery without needing Docker.
 
 The jobs API returns an array, so pagination shows the loaded page size and page number without inventing a filtered total. A full page enables Next; a short or empty page disables it. Statistics always cover the entire queue. Polling preserves form input and selection. Dates use the viewer's local timezone. Job details distinguish current status from retained claim metadata.
 

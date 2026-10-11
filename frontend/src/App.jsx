@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import useDashboard from './hooks/useDashboard.js';
+import useConnection from './hooks/useConnection.js';
+import ConnectionNotice from './components/ConnectionNotice.jsx';
 import { formatTime } from './lib/format.js';
 import Icon from './components/Icon.jsx';
 import JobForm from './components/JobForm.jsx';
@@ -31,10 +33,12 @@ export default function App() {
     window.addEventListener('hashchange', navigate);
     return () => window.removeEventListener('hashchange', navigate);
   }, []);
-  const dashboard = useDashboard({ ...query, selectedId });
+  const connection = useConnection();
+  const dashboard = useDashboard({ ...query, selectedId, enabled: connection.ready, onConnectionLost: connection.disconnected });
   const closeDetails = useCallback(() => setSelectedId(null), []);
   const connectionError = dashboard.errors.jobs || dashboard.errors.stats;
-  const connection = connectionError ? 'Reconnecting' : dashboard.lastRefresh ? 'Live' : 'Connecting';
+  const connectionLabel = connection.ready ? connectionError ? 'Connection error' : 'Live'
+    : connection.phase === 'unavailable' ? 'Offline' : connection.hasConnected ? 'Reconnecting' : 'Connecting';
 
   function selectStatus(status) {
     setQuery((previous) => ({ ...previous, status, offset: 0 }));
@@ -56,20 +60,21 @@ export default function App() {
       <nav><a className={`nav-link ${view === 'queue' ? 'active' : ''}`} aria-current={view === 'queue' ? 'page' : undefined} href="#overview" onClick={() => changeView('queue')}><Icon name="overview" />Queue</a><a className="nav-link" href="#submit" onClick={() => changeView('queue')}><Icon name="plus" />New job</a><details className="test-nav"><summary className={`nav-link ${view === 'tests' ? 'active' : ''}`}><Icon name="activity" />Tests<span className="test-nav-chevron">⌄</span></summary><div className="test-nav-items">{scenarios.map((scenario) => <div className="test-nav-row" key={scenario.id}><a className={view === 'tests' && testSelection === scenario.id ? 'selected-test' : ''} aria-current={view === 'tests' && testSelection === scenario.id ? 'page' : undefined} href="#test-lab" onClick={() => { setTestSelection(scenario.id); changeView('tests'); }}>{scenario.short}</a><InfoTip label={scenario.name}>{scenario.description}</InfoTip></div>)}</div></details></nav>
       <div className="sidebar-bottom"><div className="sidebar-footer"><span>Queue console</span><span>v0.1.0</span></div></div>
     </aside>
-    <div className="workspace" id="overview">
-      <header className="topbar"><div className="breadcrumb"><span>Sluice</span><Icon name="chevron" size={13} /><strong>{view === 'queue' ? 'Queue' : 'Tests'}</strong></div><div className="connection-status" data-state={connectionError ? 'error' : dashboard.lastRefresh ? 'live' : 'connecting'}><span className="status-dot" />{connection}</div></header>
+    <div className="workspace" id="overview" data-connection={connection.phase}>
+      <header className="topbar"><div className="breadcrumb"><span>Sluice</span><Icon name="chevron" size={13} /><strong>{view === 'queue' ? 'Queue' : 'Tests'}</strong></div><div className="connection-status" data-state={connection.phase === 'connecting' ? 'connecting' : connection.ready && !connectionError ? 'live' : 'error'}>{connection.phase === 'connecting' ? <span className="spinner" aria-hidden="true" /> : <span className="status-dot" />}{connectionLabel}</div></header>
       <main id="main-content" className="main-content">
         <section className="page-heading" aria-labelledby="page-title"><div><h1 id="page-title">{view === 'queue' ? 'Queue dashboard' : 'Test lab'}</h1><p>{view === 'queue' ? 'Manage jobs and monitor processing.' : 'Run a scenario. Watch the queue in action.'}</p></div>{view === 'queue' ? <a className="button button-primary new-job-button" href="#submit"><Icon name="plus" size={17} />New job</a> : <a className="button" href="#overview" onClick={() => changeView('queue')}><Icon name="jobs" size={16} />View queue</a>}</section>
-        {connectionError && <div className="connection-error" role="alert"><Icon name="alert" size={18} /><div><strong>Cannot reach the queue</strong><p>{dashboard.errors.stats || connectionError} Retrying automatically.</p></div></div>}
+        <ConnectionNotice connection={connection} />
+        {connection.ready && connectionError && <div className="connection-error" role="alert"><Icon name="alert" size={18} /><div><strong>Cannot reach the queue</strong><p>{dashboard.errors.stats || connectionError} Retrying automatically.</p></div></div>}
         <section className="queue-view" hidden={view !== 'queue'} aria-label="Queue dashboard">
-        <div className="overview-toolbar"><span className="section-label">JOB COUNTS</span><div className="refresh-tools"><span className="last-refresh">{dashboard.lastRefresh ? <>Updated <time dateTime={new Date(dashboard.lastRefresh).toISOString()}>{formatTime(dashboard.lastRefresh)}</time></> : 'Loading'}</span><button type="button" id="refresh-button" className="button button-small" disabled={dashboard.refreshing} onClick={dashboard.refresh}><Icon name="refresh" size={14} className={dashboard.refreshing ? 'rotating' : ''} />{dashboard.refreshing ? 'Refreshing' : 'Refresh'}</button></div></div>
-        <section className="metrics-grid" aria-label="Filter jobs by status">{metrics.map((metric) => <button type="button" className={`metric-card metric-${metric.key}`} key={metric.key} title={metric.description} aria-label={`Show ${metric.key === 'total' ? 'all' : metric.label.toLowerCase()} jobs`} aria-pressed={query.status === (metric.key === 'total' ? '' : metric.key)} onClick={() => selectStatus(metric.key === 'total' ? '' : metric.key)}><span className="metric-top"><span>{metric.label}</span><span className="metric-icon"><Icon name={metric.icon} size={16} /></span></span><span className="metric-value">{dashboard.stats ? dashboard.stats[metric.key].toLocaleString() : <span className="metric-placeholder" aria-label="Not loaded">—</span>}</span></button>)}</section>
-        <div className="dashboard-grid"><JobsTable jobs={dashboard.jobs} loaded={dashboard.jobsLoaded} refreshing={dashboard.refreshing} error={dashboard.errors.jobs} {...query} selectedId={selectedId} onStatusChange={(status) => setQuery((previous) => ({ ...previous, status, offset: 0 }))} onLimitChange={(limit) => setQuery((previous) => ({ ...previous, limit, offset: 0 }))} onPageChange={(offset) => setQuery((previous) => ({ ...previous, offset }))} onOpenJob={setSelectedId} onRefresh={dashboard.refresh} /><JobForm onSubmitted={dashboard.refresh} onOpenJob={setSelectedId} /></div>
+        <div className="overview-toolbar"><span className="section-label">JOB COUNTS</span><div className="refresh-tools"><span className="last-refresh">{dashboard.lastRefresh ? <>Updated <time dateTime={new Date(dashboard.lastRefresh).toISOString()}>{formatTime(dashboard.lastRefresh)}</time></> : 'Loading'}</span><button type="button" id="refresh-button" className="button button-small" disabled={!connection.ready || dashboard.refreshing} onClick={dashboard.refresh}><Icon name="refresh" size={14} className={dashboard.refreshing ? 'rotating' : ''} />{dashboard.refreshing ? 'Refreshing' : 'Refresh'}</button></div></div>
+        <section className="metrics-grid" aria-label="Filter jobs by status" aria-busy={!dashboard.stats && connection.phase !== 'unavailable'}>{metrics.map((metric) => <button type="button" className={`metric-card metric-${metric.key}`} key={metric.key} title={metric.description} aria-label={`Show ${metric.key === 'total' ? 'all' : metric.label.toLowerCase()} jobs`} aria-pressed={query.status === (metric.key === 'total' ? '' : metric.key)} onClick={() => selectStatus(metric.key === 'total' ? '' : metric.key)}><span className="metric-top"><span>{metric.label}</span><span className="metric-icon"><Icon name={metric.icon} size={16} /></span></span><span className="metric-value">{dashboard.stats ? dashboard.stats[metric.key].toLocaleString() : <><span className="skeleton metric-skeleton" aria-hidden="true" /><span className="sr-only">Not loaded</span></>}</span></button>)}</section>
+        <div className="dashboard-grid"><JobsTable jobs={dashboard.jobs} loaded={dashboard.jobsLoaded} refreshing={dashboard.refreshing} error={connection.ready ? dashboard.errors.jobs : undefined} connectionState={connection.phase} {...query} selectedId={selectedId} onStatusChange={(status) => setQuery((previous) => ({ ...previous, status, offset: 0 }))} onLimitChange={(limit) => setQuery((previous) => ({ ...previous, limit, offset: 0 }))} onPageChange={(offset) => setQuery((previous) => ({ ...previous, offset }))} onOpenJob={setSelectedId} onRefresh={dashboard.refresh} /><JobForm ready={connection.ready} onSubmitted={dashboard.refresh} onOpenJob={setSelectedId} /></div>
         </section>
-        <div hidden={view !== 'tests'}><TestLab selection={testSelection} onSelectionChange={setTestSelection} onOpenJob={setSelectedId} onChanged={dashboard.refresh} /></div>
-        <footer className="page-footer"><span>Automatic updates</span><span>Times shown in your local timezone</span></footer>
+        <div hidden={view !== 'tests'}><TestLab ready={connection.ready} onConnectionLost={connection.disconnected} selection={testSelection} onSelectionChange={setTestSelection} onOpenJob={setSelectedId} onChanged={dashboard.refresh} /></div>
+        <footer className="page-footer"><span>{connection.ready ? 'Automatic updates' : 'Waiting for connection'}</span><span>Times shown in your local timezone</span></footer>
       </main>
     </div>
-    {selectedId !== null && <JobDetails key={selectedId} id={selectedId} job={dashboard.detail} error={dashboard.errors.detail} refreshing={dashboard.refreshing} onClose={closeDetails} onRefresh={dashboard.refresh} />}
+    {selectedId !== null && <JobDetails key={selectedId} id={selectedId} job={dashboard.detail} error={dashboard.errors.detail} refreshing={dashboard.refreshing} connection={connection} onClose={closeDetails} onRefresh={dashboard.refresh} />}
   </>;
 }

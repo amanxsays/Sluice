@@ -639,6 +639,7 @@ The dark React/Vite queue console lives in [`frontend/`](frontend/README.md). Qu
 - **Test lab:** the sidebar's **Tests** dropdown opens the chosen scenario in its own view. Hover, focus, or tap the circled **i** for an explanation. Dedicated test workers use the selected thread count; animations follow actual database state and events. Expand **Event log** or **Verification details** when needed.
 - **Inspector:** current status, attempts, dates, formatted payload, and copy buttons. Expand **Worker & lease details** for claim metadata and idempotency. Escape closes the dialog and returns keyboard focus.
 - **Live updates:** one polling batch at a time; requests from old filters are cancelled or ignored, while form input, focus, selected job, and previously loaded data survive refreshes.
+- **Server wake-up:** shimmer placeholders and one connection notice while read-only readiness checks retry. Forms remain editable, but submissions wait for a successful connection. Normal polling resumes immediately when ready; after three minutes, automatic retries stop and **Try again** appears. Reconnection preserves loaded data and inputs, and submissions are never automatically replayed.
 
 Start PostgreSQL and the API from the repository root:
 
@@ -805,7 +806,7 @@ Recorded validation for the current implementation:
 
 ```text
 Java reactor:      50 tests (39 core + 11 API), 0 failures, 0 errors, 0 skipped
-Frontend suite:    17 tests, 0 failures, 0 skipped
+Frontend suite:    25 tests, 0 failures, 0 skipped
 Frontend lint:    passed
 Production build: passed
 ```
@@ -897,11 +898,13 @@ npm test
 npm run build
 ```
 
-The frontend's 17 focused tests use Node's built-in runner and require no Docker. They cover payload serialization, idempotency keys, direct array responses, status counts, HTTP 400/404/server errors, network failures, request timeouts, cancellation, safe payload formatting, and polling concurrency and cleanup.
+The frontend's 25 focused tests use Node's built-in runner and require no Docker. They cover payload serialization, idempotency keys, direct array responses, status counts, HTTP 400/404/server errors, network failures, request timeouts, cancellation, safe payload formatting, and polling concurrency and cleanup. Connection tests verify immediate readiness, serialized retries, the independent three-minute deadline, stale-response cancellation, manual recovery, and reconnection after an established session.
 
 Live Chrome verification on October 11, 2026 exercised real job submission, completion, a slow job's claimed state, repeated 429 failures reaching dead-letter, idempotency, filters, pagination, copy controls, keyboard focus, live detail updates, and form preservation. Network failure and details-404 responses were injected for error-handling checks; successful job data came from the real backend. A delayed real response was also used to verify that a newer filter cannot be overwritten by an older response. Test lab verification additionally exercised all seven live scenarios, dynamic forms, tooltip hover/focus/Escape, reopening the current report after page reload, job inspection from animated cards, and idempotent ordinary batch resubmission.
 
 Responsive browser checks covered 390, 768, 1024, and 1440 px widths. Automated axe-core scans reported no WCAG A/AA violations on the desktop dashboard, mobile dashboard, or details dialog; automated scans do not replace a full manual accessibility audit.
+
+Additional Chrome checks simulated a sleeping server returning HTTP 503: only readiness requests ran during startup, submissions stayed disabled, inputs survived manual recovery, and loaded jobs survived reconnection without replaying POST requests. Startup and unavailable states were checked at 320, 390, 768, and 1440 px. The inspector also recovered from an unavailable connection; eleven additional axe-core scans reported no WCAG A/AA violations.
 
 The GitHub Actions workflow currently runs **Maven tests** on pushes and pull requests targeting `master`. Frontend lint, tests, builds, and browser checks are run separately; they are not yet part of that workflow.
 
@@ -976,7 +979,7 @@ sluice-core/src/test/java/dev/sluice/core/BenchmarkRunner.java
 - [x] **Interactive Test lab:** Seven real scenarios with dedicated worker threads, changing inputs, ⓘ explanations, live queue and scenario animations, worker ownership, event history, and measured results.
 - [x] **Independent deployments:** Netlify/Render configuration, environment-driven connections, explicit frontend CORS origins, health endpoint, and embedded demo upstream.
 - [x] **Recorded Java suite:** 50 tests passed (39 core and 11 API), with no failures, errors, or skipped tests.
-- [x] **Frontend validation:** 17 tests, lint, and production build passed; live backend browser checks and automated accessibility scans completed.
+- [x] **Frontend validation:** 25 tests, lint, and production build passed; live backend and simulated server wake-up browser checks and automated accessibility scans completed.
 - [ ] **Frontend CI:** Add frontend lint, tests, and production builds to the existing Maven workflow.
 - [ ] **Schedule coordination:** Make schedule enqueueing and advancement atomic and coordinate due schedules across application instances.
 - [ ] **Future benchmark:** Measure worker behavior with the shared limiter enabled and report its capacity and refill configuration.

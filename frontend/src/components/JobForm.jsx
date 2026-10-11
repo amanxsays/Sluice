@@ -8,7 +8,7 @@ const presets = [
   { key: 'failure', label: 'Failure', icon: 'alert', payload: { latencyMs: 0, shouldFail: true, retryAfterSeconds: 3 }, description: 'Retries every 3 seconds, then moves to dead letter.' },
 ];
 
-export default function JobForm({ onSubmitted, onOpenJob }) {
+export default function JobForm({ onSubmitted, onOpenJob, ready }) {
   const [jobType, setJobType] = useState('call-api');
   const [payload, setPayload] = useState(JSON.stringify(presets[0].payload, null, 2));
   const [idempotencyKey, setIdempotencyKey] = useState('');
@@ -32,7 +32,7 @@ export default function JobForm({ onSubmitted, onOpenJob }) {
 
   async function submit(event) {
     event.preventDefault();
-    if (request.current) return;
+    if (request.current || !ready) return;
     const fields = { jobType, payload, idempotencyKey };
     try {
       serializeJob(fields);
@@ -82,7 +82,7 @@ export default function JobForm({ onSubmitted, onOpenJob }) {
       <div className="field"><label htmlFor="idempotency-key">{count > 1 ? 'Idempotency key prefix' : 'Idempotency key'} <span className="optional">optional</span></label><input id="idempotency-key" name="idempotencyKey" value={idempotencyKey} onChange={(event) => setIdempotencyKey(event.target.value)} placeholder="e.g. demo-01" disabled={pending} autoComplete="off" aria-describedby="idempotency-help" /><p id="idempotency-help" className="field-help">{count > 1 ? 'Reuse this prefix and batch size to avoid duplicate jobs.' : 'Reuse this key to avoid duplicate jobs.'}</p></div>
       </div></details>
       {error && <p ref={errorRef} tabIndex={-1} className="form-error" role="alert"><Icon name="alert" size={16} /><span>{error}</span></p>}
-      <button className="button button-primary submit-button" type="submit" disabled={pending}>{pending ? <><span className="spinner" />Submitting…</> : <>Enqueue {count === 1 ? 'job' : `${count} jobs`}<Icon name="arrow" size={17} /></>}</button>
+      <button className="button button-primary submit-button" type="submit" disabled={pending || !ready}>{pending ? <><span className="spinner" />Submitting…</> : !ready ? 'Waiting for connection' : <>Enqueue {count === 1 ? 'job' : `${count} jobs`}<Icon name="arrow" size={17} /></>}</button>
       {submitted && <div className="submission-result" role="status"><span className="result-icon"><Icon name="check" size={16} /></span><div><strong>{submitted.length === 1 ? `Job #${submitted[0].id} received` : `${submitted.length} jobs received`}</strong><p>Follow {submitted.length === 1 ? 'its' : 'their'} progress in the queue.</p><button type="button" className="text-button" onClick={() => onOpenJob(submitted[0].id)}>Open {submitted.length > 1 ? 'first job' : 'job'} details <Icon name="arrow" size={13} /></button></div></div>}
     </form>
   </section>;
