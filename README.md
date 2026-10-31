@@ -630,7 +630,7 @@ The default configuration uses PostgreSQL at `localhost:5432` and the API's embe
 
 ## Frontend dashboard
 
-The dark React/Vite queue console lives in [`frontend/`](frontend/README.md). Queue and Test lab have separate views. It uses real API data to show job counts, filter and paginate jobs, submit workloads, and inspect live details. Data refreshes about every three seconds; request failures preserve the last successful data.
+The dark emerald React/Vite queue console lives in [`frontend/`](frontend/README.md), with a rounded workspace, summary cards, and pill-shaped actions. Queue and Test lab have separate views. It uses real API data to show job counts, filter and paginate jobs, submit workloads, and inspect live details. The queue overview visualizes current counts by status and the share of all jobs completed. Data refreshes about every three seconds; request failures preserve the last successful data.
 
 - **Queue:** total, pending, claimed, completed, and dead-letter counts across all jobs. Click a status card to filter the jobs table; use Refresh for an immediate update.
 - **Jobs:** newest-first rows, status filters, page sizes of 10/25/50/100, and limit/offset pagination. Changing the filter or page size resets to the first page; global totals are not treated as filtered result counts.
